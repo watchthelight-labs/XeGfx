@@ -1,20 +1,47 @@
 # XeGfx: Intel Xe graphics acceleration for macOS (Hackintosh)
 
-XeGfx is an open source Intel graphics driver for macOS. It runs the Linux i915 driver inside the macOS kernel, so a Hackintosh with Intel Xe graphics (Iris Xe, Intel Arc, and the integrated GPUs of Core Ultra Meteor Lake and Arrow Lake) can get Metal and Vulkan on its own GPU instead of an unaccelerated framebuffer. Apple's own drivers stop at Ice Lake, and WhateverGreen can't help on Xe parts, so on these machines macOS normally draws everything on the CPU.
+Real GPU acceleration for Intel Core Ultra graphics on a Hackintosh. XeGfx gives Meteor Lake and Arrow Lake iGPUs
+Metal and Vulkan on macOS, so the desktop, the Dock's Liquid Glass and your apps draw on the Intel GPU instead of the
+CPU. Apple's drivers stop at Ice Lake and WhateverGreen can't help on Xe, so without a driver like this these machines run
+macOS with no acceleration at all.
 
-On an Arrow Lake laptop (Intel Core Ultra 9 275HX, iGPU `8086:7D67`) under macOS Tahoe 26.7.1 and 26.7.2, XeGfx runs the macOS desktop on the Intel GPU: WindowServer composites with Metal on it, the Dock draws its Liquid Glass effect, and About This Mac lists "Intel Xe Graphics". Apps get a Metal device and a Vulkan 1.4 device on the same GPU. The desktop now stays up for hours, but one kernel panic under heavy disk reads is still open (see [Status](#status-2026-10-28)). The goal is one driver for every Xe generation, Tiger Lake through Lunar Lake plus Arc discrete cards, on every macOS from Big Sur 11 to Tahoe 26.
+## What you get
 
-It is a test driver for people who want to help, not something to install on a Mac you depend on. Downloads are on the [releases page](https://github.com/watchthelight-labs/XeGfx/releases), and the project page is [labs.watchthelight.org/XeGfx](https://labs.watchthelight.org/XeGfx/).
+- **Metal and Vulkan 1.4** on the Intel GPU. Apps see a Metal device named "Intel(R) Graphics" and a Vulkan device from
+  Mesa's ANV.
+- **An accelerated desktop.** WindowServer composites the whole desktop on the Intel GPU, and the Dock renders its
+  Liquid Glass effect.
+- **The built-in panel at its real refresh rate.** The panel is named from its EDID and runs at 165 Hz, with HiDPI modes.
+- **It shows up like a real GPU.** About This Mac says "Intel Xe Graphics", and System Information shows 24 GB of
+  shared VRAM.
+- **Hours of uptime.** Sessions of 1, 2, 4 and 5.6 hours under a disk and Metal load script, on macOS Tahoe 26.7.1 and
+  26.7.2.
+
+It runs today on:
+
+- **Arrow Lake** (Core Ultra 9 275HX, `8086:7D67`): our test laptop, a Lenovo Legion 5 15IAX10, and a second 275HX
+  laptop ([ArrowWhatever](https://github.com/Mountainatic/ArrowWhatever)).
+- **Meteor Lake** (Core Ultra 7 155H, `8086:7D55`): a tester has Metal running on Sequoia with the XeGfx kernel driver
+  unchanged and a few framebuffer and plugin tweaks of their own.
+
+It's still a test driver. One kernel panic under heavy disk reads is open (see [Status](#status-2026-10-28)), so try it
+on a Mac you can afford to reboot, not one you depend on. Downloads are on the
+[releases page](https://github.com/watchthelight-labs/XeGfx/releases), and the project page is
+[labs.watchthelight.org/XeGfx](https://labs.watchthelight.org/XeGfx/).
+
+The goal is one driver for every Xe generation, Tiger Lake through Lunar Lake plus Arc discrete cards, on every macOS
+from Big Sur 11 to Tahoe 26. Under the hood it runs Linux's i915 driver inside the macOS kernel ([How it works](#how-it-works)).
 
 ## Does it work on my machine?
 
-Find your GPU's PCI ID with `ioreg -l | grep -i '"device-id"'` on macOS or `lspci -nn | grep VGA` on Linux. We have run XeGfx on one machine, and one other owner of the same CPU reports running it with patches of their own ([ArrowWhatever](https://github.com/Mountainatic/ArrowWhatever), documents only so far), so everything except the first row is untested. A report from your machine, working or not, is the most useful thing you can send ([issue #3](https://github.com/watchthelight-labs/XeGfx/issues/3)).
+Find your GPU's PCI ID with `ioreg -l | grep -i '"device-id"'` on macOS or `lspci -nn | grep VGA` on Linux. A report
+from your machine, working or not, is the most useful thing you can send ([issue #3](https://github.com/watchthelight-labs/XeGfx/issues/3)).
 
 | Family | Example PCI IDs (8086:) | Graphics | State |
 |---|---|---|---|
-| Arrow Lake-S / HX (Core Ultra 200S, 200HX) | 7D67 | Xe-LPG | runs: Metal, Vulkan, desktop composited (unstable) |
+| Arrow Lake-S / HX (Core Ultra 200S, 200HX) | 7D67 | Xe-LPG | **runs**: Metal, Vulkan, accelerated desktop (two laptops) |
+| Meteor Lake (Core Ultra 100H, 100U) | 7D55, 7DD5, 7D45, 7D40 | Xe-LPG | **runs**: Metal on a 155H (tester report, Sequoia) |
 | Arrow Lake-H / U (Core Ultra 200H, 200U) | 7D51, 7DD1, 7D41 | Xe-LPG(+) | untested; same GuC firmware as 7D67, so the closest match |
-| Meteor Lake (Core Ultra 100H, 100U) | 7D55, 7DD5, 7D45, 7D40 | Xe-LPG | untested; same GuC firmware |
 | Tiger Lake (11th gen Core) | 9A49, 9A40, 9A78 | Xe-LP (Iris Xe, UHD) | untested; needs its own GuC firmware linked in |
 | Alder Lake, Raptor Lake (12th to 14th gen mobile) | 46A6, 46A8, A7A0, A7A8 | Xe-LP (Iris Xe, UHD) | untested; needs its own GuC firmware |
 | Intel Arc A-series (Alchemist) | 56A0, 56A1, 5690 | Xe-HPG | untested |
