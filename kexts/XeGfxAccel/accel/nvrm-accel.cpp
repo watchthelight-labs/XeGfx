@@ -120,7 +120,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 #if defined(NMX_ACCEL) && defined(NMX_XEGFX)
 // the same accelerator over XeGfx (Intel Xe, branch xe): its own bundle id, matched only after XeGfx claims the GPU
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.7", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.8", _start, _stop) }
 #elif defined(NMX_ACCEL)
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 #else
@@ -1414,6 +1414,49 @@ static int nvaccel_fb_pat_sysctl SYSCTL_HANDLER_ARGS
 }
 SYSCTL_PROC(_debug, OID_AUTO, nvaccel_fb_pat, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, 0, 0, nvaccel_fb_pat_sysctl, "I", "PAT index of the scanout buffer's GGTT entries (write 0-3)");
 
+// I-119: read-only view of the eDP sink's DPCD (native AUX reads on AUX A, as i915 sends them on display 14), to
+// compare the link/panel setup the GOP leaves with NVIDIA's. 256 bytes from dpcd_addr, then one status byte per 16:
+// 0 ok, 1 timeout, 2 receive error, 3 not acked, 4 short reply.
+static int gDpcdAddr;
+static volatile SInt32 gDpcdBusy;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_dpcd_addr, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gDpcdAddr, 0, "first DPCD address of the dpcd window");
+static int nvXeAuxRead16(volatile uint32_t *r, uint32_t addr, uint8_t *out)
+{
+    volatile uint32_t *ctl = &r[0x64010 / 4], *data = &r[0x64014 / 4];
+    for (int tries = 0; tries < 3; tries++) {
+        data[0] = (0x9u << 28) | ((addr & 0xfffff) << 8) | 15;   // native read, 16 bytes
+        const uint32_t pw = *ctl & (1u << 19);                   // keep the power request the GOP set
+        *ctl = pw | (1u << 31) | (1u << 30) | (1u << 28) | (3u << 26) | (1u << 25) | (4u << 20) | ((18 - 1) << 5) | (32 - 1);
+        uint32_t st = 0;
+        for (int us = 0; us < 10000; us += 10) { st = *ctl; if (!(st & (1u << 31))) break; IODelay(10); }
+        *ctl = pw | (st & ((1u << 30) | (1u << 28) | (1u << 25)));  // clear done and error bits
+        if (st & (1u << 31)) return 1;
+        if (st & (1u << 28)) { IODelay(500); continue; }
+        if (st & (1u << 25)) return 2;
+        uint8_t b[20];
+        for (int i = 0; i < 5; i++) { const uint32_t v = data[i]; b[4*i] = v >> 24; b[4*i+1] = v >> 16; b[4*i+2] = v >> 8; b[4*i+3] = v; }
+        if ((b[0] >> 4) != 0) return 3;
+        if (((st >> 20) & 0x1f) < 17) return 4;
+        for (int i = 0; i < 16; i++) out[i] = b[1 + i];
+        return 0;
+    }
+    return 1;
+}
+static int nvaccel_dpcd_sysctl SYSCTL_HANDLER_ARGS
+{
+    uint8_t buf[256 + 16];
+    if (!gXeMmio || gXeMmio->getLength() < 0x80000 || gDpcdAddr < 0 || gDpcdAddr > 0xfff00) return ENOENT;
+    if (!OSCompareAndSwap(0, 1, &gDpcdBusy)) return EBUSY;
+    volatile uint32_t *r = (volatile uint32_t *)gXeMmio->getVirtualAddress();
+    for (int c = 0; c < 16; c++) {
+        for (int i = 0; i < 16; i++) buf[16 * c + i] = 0;
+        buf[256 + c] = (uint8_t)nvXeAuxRead16(r, (uint32_t)gDpcdAddr + 16 * c, &buf[16 * c]);
+    }
+    gDpcdBusy = 0;
+    return SYSCTL_OUT(req, buf, sizeof buf);
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_dpcd, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_dpcd_sysctl, "S", "256 DPCD bytes from dpcd_addr, then 16 status bytes");
+
 static void nvXeVblSysctls(void)
 {
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vblsync);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us);
@@ -1424,7 +1467,7 @@ static void nvXeVblSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us_max); sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_wait_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_pipe);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_hit);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_miss);
-    sysctl_register_oid(&sysctl__debug_nvaccel_mmio_addr);     sysctl_register_oid(&sysctl__debug_nvaccel_mmio_win); sysctl_register_oid(&sysctl__debug_nvaccel_fb_pat);
+    sysctl_register_oid(&sysctl__debug_nvaccel_mmio_addr);     sysctl_register_oid(&sysctl__debug_nvaccel_mmio_win); sysctl_register_oid(&sysctl__debug_nvaccel_fb_pat); sysctl_register_oid(&sysctl__debug_nvaccel_dpcd_addr); sysctl_register_oid(&sysctl__debug_nvaccel_dpcd);
 }
 static uint64_t nvXeUs(uint64_t t0) { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns); return ns / 1000; }
 // Waits (at most 25 ms) until the transcoder showing an h-line mode is in vblank. Read-only: TRANSCONF, TRANS_VTOTAL
