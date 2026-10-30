@@ -80,6 +80,11 @@ static int nvlog_dropped(const char *fmt, uint64_t *rep) {
     if (n % NVLOG_EVERY == 0) { *rep = n; return 0; }
     return 1;
 }
+// Uncapped: the xe-live pass logger repeats one format hundreds of times on purpose, and nvlog keeps only 8 of each.
+void nvlog_raw(const char *fmt, ...) {
+    char b[512]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
+    syslog(LOG_NOTICE, "NVMTL: %s", b);
+}
 const char *nvmtl_log_path(void) {
 #if NVMTL_RELEASE
     return "/private/tmp/nvmtl-off.log";
