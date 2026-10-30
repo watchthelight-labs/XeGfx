@@ -120,7 +120,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 #if defined(NMX_ACCEL) && defined(NMX_XEGFX)
 // the same accelerator over XeGfx (Intel Xe, branch xe): its own bundle id, matched only after XeGfx claims the GPU
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.4", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.5", _start, _stop) }
 #elif defined(NMX_ACCEL)
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 #else
@@ -1371,6 +1371,20 @@ static void nvXeIopCapture(const volatile unsigned *d, unsigned dpr, unsigned w,
         for (unsigned x = 0; x < kIopCap; x++) gIopCapBuf[y * kIopCap + x] = d[(unsigned long)(y0 + y) * dpr + x0 + x];
     gIopCapArm = 0; OSIncrementAtomic(&gIopCapSeq);
 }
+static IOMemoryMap *gXeMmio;
+// I-119: read-only window on the display registers (PSR, FBC, cursor and plane state the firmware left), 64 dwords
+// from mmio_addr; nothing here writes MMIO.
+static int gMmioAddr = 0x60800;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_mmio_addr, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gMmioAddr, 0, "first register of the mmio window");
+static int nvaccel_mmio_win_sysctl SYSCTL_HANDLER_ARGS
+{
+    uint32_t v[64];
+    if (!gXeMmio || gMmioAddr < 0 || (gMmioAddr & 3) || (uint64_t)gMmioAddr + sizeof v > gXeMmio->getLength()) return ENOENT;
+    volatile uint32_t *r = (volatile uint32_t *)gXeMmio->getVirtualAddress();
+    for (unsigned i = 0; i < 64; i++) v[i] = r[gMmioAddr / 4 + i];
+    return SYSCTL_OUT(req, v, sizeof v);
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_mmio_win, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_mmio_win_sysctl, "S", "64 registers from mmio_addr");
 static void nvXeVblSysctls(void)
 {
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vblsync);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us);
@@ -1381,8 +1395,8 @@ static void nvXeVblSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us_max); sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_wait_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_pipe);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_hit);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_miss);
+    sysctl_register_oid(&sysctl__debug_nvaccel_mmio_addr);     sysctl_register_oid(&sysctl__debug_nvaccel_mmio_win);
 }
-static IOMemoryMap *gXeMmio;
 static uint64_t nvXeUs(uint64_t t0) { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns); return ns / 1000; }
 // Waits (at most 25 ms) until the transcoder showing an h-line mode is in vblank. Read-only: TRANSCONF, TRANS_VTOTAL
 // and PIPEDSL of pipes A-D on display version 12 and later; XeGfx leaves the display to the firmware's mode.
