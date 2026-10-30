@@ -51,7 +51,7 @@ If your Tiger Lake, Alder Lake or Raptor Lake laptop only needs its panel to wor
 
 ## How it works
 
-XeGfx is not a GPU driver written from scratch. FreeBSD's [drm-kmod](https://github.com/freebsd/drm-kmod) already runs i915 on a non-Linux kernel through LinuxKPI, a layer that implements the Linux kernel API on top of FreeBSD's. XeGfx adds a small FreeBSD-kernel-API layer for XNU underneath LinuxKPI, so drm core and i915 build as one kext with their sources almost untouched. In userspace, Mesa's ANV Vulkan driver talks to it through a patched libdrm, and the Metal-to-Vulkan plugin of [NvGfx](https://github.com/watchthelight-labs/NvGfx) (branch `xe`) runs on ANV, the same way that project gives Metal to NVIDIA GPUs. [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) walks through each layer.
+XeGfx is not a GPU driver written from scratch. FreeBSD's [drm-kmod](https://github.com/freebsd/drm-kmod) already runs i915 on a non-Linux kernel through LinuxKPI, a layer that implements the Linux kernel API on top of FreeBSD's. XeGfx adds a small FreeBSD-kernel-API layer for XNU underneath LinuxKPI, so drm core and i915 build as one kext with their sources almost untouched. In userspace, Mesa's ANV Vulkan driver talks to it through a patched libdrm, and a Metal-to-Vulkan plugin runs on ANV. The plugin and the Metal accelerator kext are forks of NullMoth's NVIDIA driver, carried here from [NvGfx](https://github.com/watchthelight-labs/NvGfx), so this repository holds the whole Intel driver, kernel to Metal. [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) walks through each layer.
 
 ## Status (2026-10-28)
 
@@ -76,14 +76,14 @@ What each step showed on the 7D67:
 - **Userspace (N-230).** A user process opened `/dev/dri/renderD128`, created a context, mapped buffers and ran execbuffer on the render and copy engines, and the results read back correctly.
 - **libdrm (N-233).** `drmGetDevices2` lists the GPU as `0000:00:02.0 8086:7d67`, driver i915 1.6.0.
 - **Vulkan through Mesa ANV (N-234).** ANV creates a Vulkan 1.4 device (API 1.4.363), "Intel(R) Graphics (ARL)", and a compute pipeline on it. A draw test (`tools/vkdraw` on NvGfx `xe`, commit `9c9cbc3`) cleared a 64x64 image to red in a render pass, drew a green triangle into it (exactly 512 green pixels), copied the image to a host buffer, and the CPU read back the right pixels.
-- **Metal (N-235 to N-238).** XeGfx's stage 7 hands the GPU to XeGfxAccel, the NMXAccel accelerator from NvGfx built over XeGfx (`build/nvgfx/build_nvaccel.sh xegfxaccel` on NvGfx `xe`). The NvGfx Metal plugin then runs on ANV. Metal shows one device, "Intel(R) Graphics (ARL)". An MSL compute kernel fills 1024 values correctly, and a render pipeline draws a green triangle on red that reads back exactly. Getting there took three fixes. Render nodes are world-accessible, as on Linux. GFP_ATOMIC allocations get a reserve, because i915 allocates under spinlocks. Host-visible BOs use the GPU's snooping write-back PAT, because XNU keeps RAM write-back whatever cache mode an IOKit mapping asks for, and write-combining BOs lost cache lines to CPU write-backs.
+- **Metal (N-235 to N-238).** XeGfx's stage 7 hands the GPU to XeGfxAccel, NullMoth's NMXAccel accelerator built over XeGfx (`kexts/XeGfxAccel`). The Metal plugin (`plugin/`) then runs on ANV. Metal shows one device, "Intel(R) Graphics (ARL)". An MSL compute kernel fills 1024 values correctly, and a render pipeline draws a green triangle on red that reads back exactly. Getting there took three fixes. Render nodes are world-accessible, as on Linux. GFP_ATOMIC allocations get a reserve, because i915 allocates under spinlocks. Host-visible BOs use the GPU's snooping write-back PAT, because XNU keeps RAM write-back whatever cache mode an IOKit mapping asks for, and write-combining BOs lost cache lines to CPU write-backs.
 - **Desktop (N-245 to N-260).** WindowServer can't open `/dev/dri` from inside its sandbox, so libdrm now sends its ioctls through the accelerator's IOKit user client when the node is refused (0.0.28). With that, a restarted WindowServer composites on the Intel GPU through Metal. On N-258 it stayed up through the settle, put 425 frames on the panel and kept the desktop for two hours before a kernel panic (one CPU stopped answering). On N-260 the machine froze about 20 s in, with no panic report. Frames reach the panel through a copy into the firmware's framebuffer, because macOS does not yet send display-pipe transactions to this GPU, so the desktop is slow even when it runs. 
 - **Accelerated desktop (N-285 to N-289, 2026-10-24).** WindowServer now runs on the Intel GPU and stays up: on N-285 it passed the guard's settle window and served the desktop for about four minutes, with 3660 display transactions and no failed frames. The fix that got it there was in the Metal plugin: WindowServer hands it some buffers that are not all writable memory, and importing those as host pointers lost the device about 20 s in, so the plugin now copies them instead. The Dock renders its Liquid Glass effect, which needs working GPU compositing. XeGfxIntelFB 0.5 sets the GPU's model name, so About This Mac and System Information show "Intel Xe Graphics".
 - **What still breaks.** One panic is understood and fixed: a lock that sleeps was taken inside an RCU read section on the mmap path WindowServer uses (0.0.42 takes the locks in the other order). The other is not: 15 to 45 seconds into some runs one CPU keeps interrupts off for over half a second and macOS panics because that CPU does not answer a rendezvous. GPU interrupts keep arriving and are handled right up to the end. 0.0.43 adds a watchdog that names that CPU and what it was running before macOS gives up. Turning the NVRAM trace off made it much rarer (on this firmware its NVRAM writes run in SMM, where a CPU cannot answer the rendezvous), but it came back on N-304 after 4 h 19 min under heavy disk reads with the trace off, so that was not the whole cause.
 
 The open problems are tracked in [NvGfx #12](https://github.com/watchthelight-labs/NvGfx/issues/12) and [#18](https://github.com/watchthelight-labs/NvGfx/issues/18).
 
-The source is at 0.0.46 ([CHANGELOG](CHANGELOG.md)), which is also the newest booted version. With the NVRAM trace off (`xegfx.nvram_trace=0`) the Intel desktop ran one hour on N-296, then two hours (N-297), four hours (N-298) and 5.6 hours (N-299) while a load script wrote about 225 GB to disk and ran Metal draws every 22 seconds. N-304 then hit I-116 after 4 h 19 min while another process read the kernel collections over and over, so the stall is rarer, not gone. 0.0.46 fixes the panic that N-299's restart hit (I-121). On the Intel GPU, System Information now shows 24 GB of shared VRAM, and the panel is named from its EDID and runs at 165 Hz with the HiDPI mode. The newest test build is the [v0.0.46 prerelease](https://github.com/watchthelight-labs/XeGfx/releases/tag/v0.0.46). Desktop runs need the NvGfx `xe` build of the accelerator and plugin as well.
+The source is at 0.0.46 ([CHANGELOG](CHANGELOG.md)), which is also the newest booted version. With the NVRAM trace off (`xegfx.nvram_trace=0`) the Intel desktop ran one hour on N-296, then two hours (N-297), four hours (N-298) and 5.6 hours (N-299) while a load script wrote about 225 GB to disk and ran Metal draws every 22 seconds. N-304 then hit I-116 after 4 h 19 min while another process read the kernel collections over and over, so the stall is rarer, not gone. 0.0.46 fixes the panic that N-299's restart hit (I-121). On the Intel GPU, System Information now shows 24 GB of shared VRAM, and the panel is named from its EDID and runs at 165 Hz with the HiDPI mode. The newest test build is the [v0.0.46 prerelease](https://github.com/watchthelight-labs/XeGfx/releases/tag/v0.0.46). Desktop runs need the accelerator and plugin from this repository as well.
 
 [VedCloud's Meteor Lake port](https://github.com/VedCloud/Meteor-Lake-Xe-LPG-Metal-Graphics) got to a GPU-composited desktop first: it runs an i915-derived driver with Metal and Vulkan on a Dell Latitude 5350 under macOS 15. XeGfx takes a different road (unchanged drm-kmod sources over its own shim) and targets Tahoe as well.
 
@@ -106,9 +106,9 @@ XeGfx is built on other people's work. Thanks to all of them.
 | [FreeBSD LinuxKPI](https://github.com/freebsd/freebsd-src/tree/main/sys/compat/linuxkpi) and [FreeBSD kernel](https://github.com/freebsd/freebsd-src) | the Linux kernel API layer, plus `subr_eventhandler.c` and FreeBSD's headers |
 | [Linux](https://github.com/torvalds/linux) i915 and DRM | the driver drm-kmod tracks; the `sync_file` uapi header |
 | [linux-firmware](https://gitlab.com/kernel-firmware/linux-firmware) | Intel's GuC firmware (`LICENSE.i915`) |
-| [nullmoth/nvidia-macos-driver](https://github.com/nullmoth/nvidia-macos-driver) | the Metal plugin and accelerator NvGfx forks; its old AMD/Intel port (commit `bf2dee3`) supplies the GPL-free dma-buf, sync_file and fence-unwrap replacements and the Mesa/libdrm Darwin patches used in NvGfx's `xe` branch |
+| [nullmoth/nvidia-macos-driver](https://github.com/nullmoth/nvidia-macos-driver) | `plugin/`, `kexts/XeGfxAccel`, `kexts/XeGfxAGDC` and `kexts/NMIntelFB` are forks of it; its old AMD/Intel port (commit `bf2dee3`) supplies the GPL-free dma-buf, sync_file and fence-unwrap replacements and the Mesa/libdrm Darwin patches used in NvGfx's `xe` branch |
 | [Mesa](https://gitlab.freedesktop.org/mesa/mesa) ANV and [libdrm](https://gitlab.freedesktop.org/mesa/drm) | the Vulkan userspace |
-| [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) | the Metal-to-SPIR-V translator inside the NvGfx plugin; its coverage table and refusals list, and its Arrow Lake ANV validation profile |
+| [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) | the Metal-to-SPIR-V translator in `translator/`; its coverage table and refusals list, and its Arrow Lake ANV validation profile |
 | [watchthelight-labs/kcabi](https://github.com/watchthelight-labs/kcabi) | kernel collection link and ABI checks |
 
 **Projects we studied** (ideas, findings and warnings only; no code copied):
@@ -151,34 +151,28 @@ A broken GPU driver can stop a machine before anything reaches the disk, so the 
 - `debug.xegfx_env` sets tunables for the next stage (`compat.linuxkpi.i915_enable_guc=3` and the like), so one boot can try several settings.
 - The link fails if the kext redefines any symbol the kernel exports (`tools/shadow_check.py`). That bug class killed the first two hardware tests.
 
-## Where development happens
-
-This repository holds the XNU side: the FreeBSD-kernel-API layer (`shim/`), the build harness and the checks. It is pulled as a subtree into the [NvGfx](https://github.com/watchthelight-labs/NvGfx) fork, branch `xe`, under `gpu/xegfx`, and that is where you should build it. The fork adds `gpu/xkpi`, an overlay that replaces the few drm-kmod files that are GPL-only and holds the i915 glue the stages call (`xg_i915_state`, `xg_i915_exec`, `xg_i915_gtawake` and the rest of `shim/include/xg_i915.h`), and the Metal plugin and accelerator glue. A build from this repository alone still uses drm-kmod's GPL-only headers and is only good for development.
-
 ## Building
 
-You need the Xcode Command Line Tools (clang and the macOS SDK) and Python 3. The third-party sources are not in the repository; the scripts expect sparse clones in `~/src/xe-src`:
+You need the Xcode Command Line Tools (clang and the macOS SDK; the scripts are tested with `SDKROOT` set to the 15.5 SDK) and Python 3. Third-party sources are not in the repository:
 
-- `linux`: the Linux kernel tree
-- `freebsd`: the FreeBSD source tree (LinuxKPI lives in `sys/compat/linuxkpi`)
-- `drm-kmod`: FreeBSD's drm-kmod (commit `c16de0f`, Linux 6.14 level)
-- `linux-firmware`: `mtl_guc_70.bin` and `LICENSE.i915` (Meteor Lake and Arrow Lake GuC), linked into the kext
-
-From the NvGfx `xe` branch:
+- `~/src/xe-src`: sparse clones of `linux` (the Linux kernel), `freebsd` (LinuxKPI lives in `sys/compat/linuxkpi`), `drm-kmod` (commit `c16de0f`, Linux 6.14 level) and `linux-firmware` (`mtl_guc_70.bin` and `LICENSE.i915`, linked into the kext)
+- `~/src/deps/open-gpu-${NVRM_TAG:-615.78.08}`: NVIDIA's open-gpu-kernel-modules, whose headers XeGfxAccel compiles against
+- `~/src/deps/Vulkan-Headers`: Khronos Vulkan headers for the plugin
+- rustup stable for the translator, and the Mesa and libdrm trees `userland/BUILD.md` lists
 
 ```
-build/nvgfx/build_xegfx.sh      # objects, licence gate, link, KPI / shadow / kcabi link checks
+build/build_xegfx.sh          # XeGfx.kext into out/: objects, licence gate, link, KPI / shadow / kcabi checks
+build/build_xegfxaccel.sh     # XeGfxAccel.kext, the Metal accelerator
+build/build_xegfxintelfb.sh   # XeGfxIntelFB.kext
+build/build_xegfxagdc.sh      # XeGfxAGDC.kext
+build/build_nmintelfb.sh      # NMIntelFB.kext, the boot framebuffer on the iGPU
+build/build_plugin.sh         # the Metal plugin, NVMTLDriver (RELEASE=1 for a release build)
+build/build_xlate.sh          # libnvmtl_translate.dylib, Metal AIR to SPIR-V
+userland/scripts/build_*.sh   # libdrm, Mesa ANV and the Vulkan loader
+sudo tools/install.sh         # into the auxiliary kernel collection (XEGFX_MODE=uninstall to remove)
 ```
 
-Here, for work on the shim itself:
-
-```
-python3 harness/score.py --obj   # objects in out/obj, undefined symbols in out/undefined.txt
-bash tools/link.sh               # out/XeGfx.kext
-sudo tools/install.sh            # into the auxiliary kernel collection (XEGFX_MODE=uninstall to remove)
-```
-
-`tools/kpi_split.py` and the link check use [kcabi](https://github.com/watchthelight-labs/kcabi), expected in `~/src/kcabi`.
+Kexts and the plugin land in `~/src/XeGfx-build` (`OUTROOT`, `XEGFX_OUT`). `build/xeaccel-pkg` and `build/xeintelfb-pkg` hold install scripts that swap one kext in the auxiliary collection and keep a backup. `tools/kpi_split.py` and the link check use [kcabi](https://github.com/watchthelight-labs/kcabi), expected in `~/src/kcabi`.
 
 ## Layout
 
@@ -187,9 +181,19 @@ sudo tools/install.sh            # into the auxiliary kernel collection (XEGFX_M
 | `shim/src/fbsd` | The FreeBSD kernel API on XNU: threads, locks, sleep queues, malloc and UMA, VM pages and objects, newbus and PCI, bus_dma, sysctl, taskqueues, callouts, firmware loading |
 | `shim/src/xnu` | The C++ side that talks to IOKit: kext entry and stages, PCI devices, interrupts, DMA, devfs nodes |
 | `shim/include` | XNU overrides of FreeBSD and LinuxKPI headers; `xg_bsdnames.h` renames FreeBSD functions that share a name with a kernel export |
+| `xkpi/` | Overlay on drm-kmod: replacements for its GPL-only files, LinuxKPI fixes, and the i915 glue the stages call (`xg_i915_*`) |
 | `harness/score.py` | Compiles every drm-kmod source for the XNU kernel target; `--obj` builds the objects and runs the licence gate |
-| `tools/` | `link.sh`, `kpi_check.py` (public KPIs only), `shadow_check.py`, `install.sh` |
+| `kexts/XeGfxAccel` | The Metal accelerator (IOAccelerator family) WindowServer and Metal talk to, and the copy of finished frames to the panel |
+| `kexts/XeGfxIntelFB`, `kexts/NMIntelFB` | The framebuffer kexts for the built-in panel on the iGPU |
+| `kexts/XeGfxAGDC` | The AppleGraphicsDeviceControl service IOPresentment needs before WindowServer gives the framebuffer a display pipe |
+| `plugin/` | The Metal driver bundle: Metal API on Vulkan (ANV) |
+| `translator/` | The shader translator, Metal AIR to SPIR-V (a metal2vulkan fork) |
+| `userland/` | Patches and build scripts for libdrm, Mesa ANV and the Vulkan loader on macOS, and small Vulkan and Metal test tools |
+| `tools/` | `link.sh`, `kpi_check.py` (public KPIs only), `shadow_check.py`, `install.sh`, `igfx/` (panel and EDID checks) |
+| `build/` | The build scripts above |
 | `docs/` | One design note per shim area (`xg_*.md`) and [HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) |
+
+Until 2026-10-30 everything outside `shim/`, `harness/`, `tools/` and `docs/` lived in the NvGfx fork (branches `xe` and `xe-2.6.2`); its history is there. Fixes to the shared Metal plugin are ported between the two repositories.
 
 ## Helping
 
@@ -197,4 +201,4 @@ Testers with any Intel Xe machine are the most useful thing right now, and so is
 
 ## License
 
-The project's own code is under the BSD 2-Clause license (see `LICENSE`). Third-party code keeps its own license; see `NOTICE`.
+Mixed, by folder. The kernel shim, the build scripts and the tools are under the BSD 2-Clause license (`LICENSE`). The Metal plugin, the accelerator, XeGfxAGDC and NMIntelFB are forks of NullMoth's driver and stay under PolyForm Noncommercial 1.0.0 (`licenses/`): no commercial use. The translator is LGPL-3.0. `NOTICE` has the full table.

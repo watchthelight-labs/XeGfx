@@ -97,7 +97,7 @@ def kconfig_defines():
 
 # XEGFX_OVERLAY: a directory with exclude.txt (source basenames to drop), include/ (searched before drm-kmod) and
 # src/<module>/*.c (added to that module). The NvGfx fork keeps its non-GPL replacements for drm-kmod's GPL-2.0 files
-# there (gpu/xkpi). Without an overlay the build still uses drm-kmod's GPL-only gplv2 headers and refuses --obj.
+# there (xkpi). Without an overlay the build still uses drm-kmod's GPL-only gplv2 headers and refuses --obj.
 OVERLAY = os.environ.get("XEGFX_OVERLAY")
 
 

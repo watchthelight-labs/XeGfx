@@ -15,3 +15,36 @@ FreeBSD's makeobjops.awk. They carry FreeBSD's BSD license.
 Headers in shim/include that override FreeBSD or LinuxKPI headers are
 written for XNU but may follow the shape of the files they replace; where
 they copy FreeBSD code, that code keeps its BSD license and copyright.
+
+Licences by folder
+------------------
+
+XeGfx carries every part of the Intel driver, and not all of it is under
+BSD-2. Each folder keeps the licence of the code it came from:
+
+  shim/, harness/, tools/, kext/, docs/      BSD 2-Clause (LICENSE)
+  kexts/XeGfxIntelFB/                        BSD 2-Clause, written for XeGfx
+  xkpi/                                      per file, see xkpi/NOTICE.md
+                                             (MIT, BSD-2, PolyForm Noncommercial
+                                             for the NullMoth dma-buf files)
+  plugin/                                    PolyForm Noncommercial 1.0.0
+  kexts/XeGfxAccel/, kexts/XeGfxAGDC/,       PolyForm Noncommercial 1.0.0
+  kexts/NMIntelFB/
+  userland/ scripts, tools, docs             BSD 2-Clause, written for XeGfx
+  userland/patches/*-macos.patch             PolyForm Noncommercial 1.0.0,
+                                             NullMoth's Darwin patches (bf2dee3)
+  userland/patches/*-xegfx.patch             MIT, as Mesa and libdrm
+  translator/                                LGPL-3.0 (translator/LICENSE)
+  build/                                     BSD 2-Clause
+
+plugin/, kexts/XeGfxAccel/, kexts/XeGfxAGDC/ and kexts/NMIntelFB/ are forks of
+NullMoth Systems' nvidia-macos-driver
+(https://github.com/nullmoth/nvidia-macos-driver), carried over from the
+NvGfx fork (https://github.com/watchthelight-labs/NvGfx, branch xe-2.6.2,
+commit 2b9e3b2), where their history is. The PolyForm Noncommercial 1.0.0
+text is in licenses/PolyForm-Noncommercial-1.0.0.md: no commercial use, and
+keep the notices. translator/ is a fork of steelbrain's metal2vulkan.
+
+XeGfxAccel compiles against headers from NVIDIA's open-gpu-kernel-modules
+(MIT, licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt), fetched
+separately like drm-kmod. Mesa's licence is in licenses/Mesa-license.rst.

@@ -1,4 +1,4 @@
-/* XeGfx: what stages 4 and 5 ask i915 after its attach (gpu/xkpi/src/i915/xg_i915_exec.c). Plain C types only, so
+/* XeGfx: what stages 4 and 5 ask i915 after its attach (xkpi/src/i915/xg_i915_exec.c). Plain C types only, so
  * the kext side can include it.
  * <wtl> project: xegfx | author: watchthelight </wtl> */
 #ifndef _XG_I915_H_

@@ -11,9 +11,9 @@ die() { echo "xegfx: $*" >&2; exit 1; }
 MODE=${XEGFX_MODE:-install}
 BK=/Library/XeGfx/backup-$(date +%Y%m%d-%H%M%S); mkdir -p "$BK"; [ -f "$KC" ] && cp -p "$KC" "$BK/"
 OLD=$(kmutil inspect -a x86_64 -A "$KC" 2>/dev/null | awk -F'\t' '$1 ~ /^[a-z]+\.[A-Za-z0-9.-]+$/ && $1 !~ /^com\.apple\./ && $1 != "org.watchthelight.XeGfx" && $1 != "org.watchthelight.XeGfxAccel" && $1 != "com.nullmoth.NMIntelFB" && $1 != "org.watchthelight.XeGfxAGDC" {print $1}' || true)
-# the Metal accelerator over XeGfx (build/nvgfx/build_nvaccel.sh xegfxaccel) and ANV for the NvGfx plugin; both optional
-ACC=${XEGFX_ACCEL:-$HOME/src/NvGfx-build/kexts/XeGfxAccel/26/XeGfxAccel.kext}
-[ -n "${SUDO_USER:-}" ] && ACC=${XEGFX_ACCEL:-$(eval echo "~$SUDO_USER")/src/NvGfx-build/kexts/XeGfxAccel/26/XeGfxAccel.kext}
+# the Metal accelerator over XeGfx (build/build_xegfxaccel.sh) and ANV for the Metal plugin; both optional
+ACC=${XEGFX_ACCEL:-$HOME/src/XeGfx-build/kexts/XeGfxAccel/26/XeGfxAccel.kext}
+[ -n "${SUDO_USER:-}" ] && ACC=${XEGFX_ACCEL:-$(eval echo "~$SUDO_USER")/src/XeGfx-build/kexts/XeGfxAccel/26/XeGfxAccel.kext}
 XU=${XEGFX_USERLAND:-$(eval echo "~${SUDO_USER:-root}")/src/xe-userland/prefix/lib}; GB=/Library/GPUBundles/nvmtl
 if [ "$MODE" = install ]; then
   rm -rf "$EXT/XeGfx.kext.new"; ditto "$ROOT/out/XeGfx.kext" "$EXT/XeGfx.kext.new"

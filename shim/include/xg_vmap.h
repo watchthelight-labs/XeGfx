@@ -1,6 +1,6 @@
 /*
  * XeGfx vm: kernel mappings of page lists at an address IOKit picks, for LinuxKPI's vmap() family
- * (gpu/xkpi/src/lkpi/linux_page.c). Plain C types so LinuxKPI code and the kext side can include it.
+ * (xkpi/src/lkpi/linux_page.c). Plain C types so LinuxKPI code and the kext side can include it.
  * <wtl> project: xegfx | author: watchthelight </wtl>
  */
 #ifndef _XG_VMAP_H_

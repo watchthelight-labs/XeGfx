@@ -19,7 +19,7 @@
 #include <drm.h>
 #include <i915_drm.h>
 
-/* the kext's map ioctls (gpu/xkpi/src/i915/xg_i915_map.c; NullMoth's Darwin libdrm ABI) */
+/* the kext's map ioctls (xkpi/src/i915/xg_i915_map.c; NullMoth's Darwin libdrm ABI) */
 struct xg_drm_mmap { uint64_t offset, size; uint32_t prot, flags; uint64_t addr; };
 struct xg_drm_munmap { uint64_t addr, size; };
 #define XG_DRM_IOCTL_MMAP	_IOWR('N', 0x40, struct xg_drm_mmap)
