@@ -120,7 +120,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 #if defined(NMX_ACCEL) && defined(NMX_XEGFX)
 // the same accelerator over XeGfx (Intel Xe, branch xe): its own bundle id, matched only after XeGfx claims the GPU
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.5", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.6", _start, _stop) }
 #elif defined(NMX_ACCEL)
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 #else
@@ -1348,7 +1348,7 @@ static const unsigned kIopCap = 384;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_clflush, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopClflush, 0, "1 = flush the source surface from the CPU cache before each Intel panel copy");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_x, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapX, 0, "left edge of the panel crop, pixels");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_y, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapY, 0, "top edge of the panel crop, pixels");
-SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_arm, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapArm, 0, "1 = crop after the next panel copy, 2 = just before it (what was on screen until then)");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_arm, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapArm, 0, "1 = crop after the next panel copy, 2 = just before it (what was on screen until then), 3 = after its vblank wait, before the copy");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_seq, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapSeq, 0, "crops taken");
 static int nvaccel_iop_capbuf_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -1507,6 +1507,7 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (head == 4 && gIopVblSync) {
         nvXeIopCapture(d, dpr, w, h, 2);
         OSAddAtomic64(1, nvXeWaitVblank(a->fPCI, h) ? &gCntIopVblHit : &gCntIopVblMiss);
+        nvXeIopCapture(d, dpr, w, h, 3);   // anything written into the panel during the vblank (a kernel cursor) shows here
         const uint64_t t0 = mach_absolute_time();
         if (gIopClflush) nvXeIopClflush(src, (size_t)h * pitch);
         if (pitch == q.pitch) memcpy((void *)d, (const void *)src, (size_t)h * pitch);
