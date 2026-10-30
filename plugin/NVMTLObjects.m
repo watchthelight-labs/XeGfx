@@ -3211,6 +3211,12 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {
     NVMTLTexture *nt = (NVMTLTexture *)t;
     if (!nt) { nvlog("setFragmentTexture: nil at index %lu", (unsigned long)i); return; }
+    { static unsigned left; static int armed; const unsigned m = nvmtl_xe_live_mask_r(1);
+      if (!(m & 128)) armed = 0; else if (!armed) { armed = 1; left = 400; }
+      if ((m & 128) && left && _target && [(_target->_parent ?: _target) nvi]->w <= 512 && getprogname() && !strcmp(getprogname(), "WindowServer")) { left--;
+          NVMTLTexture *r = nt->_parent ?: nt;
+          nvlog("xe-pass ftex %lu: %ux%u fmt %lu (parent fmt %lu, vk %u) surf %u view %d mips %u", (unsigned long)i, [r nvi]->w, [r nvi]->h,
+                (unsigned long)nt->_fmt, (unsigned long)r->_fmt, [nt nvi]->fmt, r->_surf ? (unsigned)IOSurfaceGetID(r->_surf) : 0u, nt->_parent != nil, nt->_mips); } }
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_cpu_dump(nt->_parent ? nt->_parent : nt);
     nvmtl_surface_in_for_cb(_cb, nt);
