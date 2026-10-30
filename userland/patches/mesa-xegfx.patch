@@ -1,0 +1,179 @@
+--- a/src/intel/common/intel_gem.h
++++ b/src/intel/common/intel_gem.h
+@@ -75,6 +75,13 @@
+ extern int intel_virtio_ioctl(int fd, unsigned long request, void *arg);
+ #endif
+ 
++#ifdef __APPLE__
++/* libdrm makes the dma-buf and sync_file descriptors an XeGfx kext cannot (xf86drm_xegfx.c) */
++extern int drmIoctl(int fd, unsigned long request, void *arg);
++/* open(2) with a read-only fallback for sandboxes without device writes (WindowServer); ioctls then go via IOKit */
++extern int drmXeGfxOpen(const char *path, int flags);
++#endif
++
+ /**
+  * Call ioctl, restarting if it is interrupted
+  */
+@@ -86,6 +93,8 @@
+     do {
+ #ifdef HAVE_INTEL_VIRTIO
+       ret = intel_virtio_ioctl(fd, request, arg);
++#elif defined(__APPLE__)
++      ret = drmIoctl(fd, request, arg);
+ #else
+       ret = ioctl(fd, request, arg);
+ #endif
+--- a/src/intel/vulkan/anv_allocator.c
++++ b/src/intel/vulkan/anv_allocator.c
+@@ -1872,6 +1872,10 @@
+    return VK_SUCCESS;
+ }
+ 
++#ifdef __APPLE__
++extern int drmNmxMunmap(void *addr, size_t length);
++#endif
++
+ VkResult
+ anv_device_unmap_bo(struct anv_device *device,
+                     struct anv_bo *bo,
+@@ -1893,6 +1897,10 @@
+       assert(((uintptr_t)map & (page_size - 1)) == 0);
+    }
+ 
++#ifdef __APPLE__
++   /* the kernel made this mapping through the node's ioctl; let it take it down before anything goes over it */
++   drmNmxMunmap(map, map_size);
++#endif
+    if (replace) {
+       map = mmap(map, map_size, PROT_NONE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+@@ -1902,7 +1910,9 @@
+       }
+    } else {
+       VG(VALGRIND_FREELIKE_BLOCK(map, 0));
++#ifndef __APPLE__
+       munmap(map, map_size);
++#endif
+    }
+    return VK_SUCCESS;
+ }
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -929,7 +929,11 @@
+    device->kmd_backend = anv_kmd_backend_get(device->info->kmd_type);
+ 
+    /* XXX(chadv): Can we dup() physicalDevice->fd here? */
++#ifdef __APPLE__
++   device->fd = drmXeGfxOpen(physical_device->path, O_RDWR | O_CLOEXEC);
++#else
+    device->fd = open(physical_device->path, O_RDWR | O_CLOEXEC);
++#endif
+    if (device->fd == -1) {
+       result = vk_error(device, VK_ERROR_INITIALIZATION_FAILED);
+       goto fail_device;
+@@ -2572,6 +2576,14 @@
+    if (alloc_flags & ANV_BO_ALLOC_IMPORTED)
+       return &device->info->pat.cached_coherent;
+ 
++#ifdef __APPLE__
++   /* XeGfx maps BOs into processes through IOKit, and XNU keeps ordinary RAM write-back whatever cache mode the
++    * mapping asks for: a write-combining BO is then cached by the CPU while the GPU writes around it, and dirty
++    * lines land on top of GPU results (XeGfx N-238, vkcoh: 20-33% of 64-byte lines lost). The snooping write-back
++    * entry keeps every host-visible BO coherent instead. Nothing scans out from ANV memory on macOS yet. */
++   if (!anv_physical_device_has_vram(device->physical))
++      return &device->info->pat.cached_coherent;
++#endif
+    if (alloc_flags & (ANV_BO_ALLOC_EXTERNAL | ANV_BO_ALLOC_SCANOUT))
+       return &device->info->pat.scanout;
+ 
+--- a/src/intel/vulkan/anv_physical_device.c
++++ b/src/intel/vulkan/anv_physical_device.c
+@@ -3014,7 +3014,11 @@
+    int master_fd = -1;
+    int ret;
+ 
++#ifdef __APPLE__
++   fd = drmXeGfxOpen(path, O_RDWR | O_CLOEXEC);
++#else
+    fd = open(path, O_RDWR | O_CLOEXEC);
++#endif
+    if (fd < 0) {
+       if (errno == ENOMEM) {
+          return vk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
+--- a/src/intel/vulkan/i915/anv_kmd_backend.c
++++ b/src/intel/vulkan/i915/anv_kmd_backend.c
+@@ -158,6 +158,10 @@
+    intel_ioctl(device->fd, DRM_IOCTL_GEM_CLOSE, &close);
+ }
+ 
++#ifdef __APPLE__
++extern void *drmNmxMmap(size_t length, int prot, int flags, int fd, off_t offset);
++#endif
++
+ static void *
+ i915_gem_mmap_offset(struct anv_device *device, struct anv_bo *bo,
+                      uint64_t offset, uint64_t size, uint32_t flags,
+@@ -185,6 +189,17 @@
+     */
+    void *ptr;
+ 
++#ifdef __APPLE__
++   /* mapped through the node's ioctl (libdrm drmNmxMmap): exactly the range asked for, since part of a kernel-made
++    * mapping cannot be unmapped; placed mappings are not supported */
++   if (placed_addr != NULL)
++      return MAP_FAILED;
++   ptr = drmNmxMmap(align64(size, 4096), PROT_READ | PROT_WRITE, MAP_SHARED, device->fd, gem_mmap.offset + offset);
++   if (ptr == MAP_FAILED)   /* a node that maps with mmap(2), such as drm-shim */
++      ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, device->fd, gem_mmap.offset + offset);
++   return ptr;
++#endif
++
+    if (device->physical->info.is_virtio)
+       ptr = intel_virtio_bo_mmap(device->fd, bo->gem_handle,
+                                  offset + size, placed_addr);
+--- a/src/util/anon_file.c
++++ b/src/util/anon_file.c
+@@ -114,7 +114,12 @@
+     const char* env;
+     char* buf;
+     struct stat st;
++#ifdef __APPLE__
++    /* WindowServer runs with real uid 0 and effective uid 88; the directory it can own is the effective one's */
++    int uid = geteuid();
++#else
+     int uid = getuid();
++#endif
+     int n;
+ 
+     env = os_get_option("XDG_RUNTIME_DIR");
+@@ -125,7 +130,7 @@
+         return buf;
+     }
+ 
+-    n = asprintf(&buf, "/tmp/xdg-runtime-mesa-%ld", (long)getuid());
++    n = asprintf(&buf, "/tmp/xdg-runtime-mesa-%ld", (long)uid);
+     if (n < 0)
+        return NULL;
+     mesa_logd("%s: XDG_RUNTIME_DIR not set; falling back to temp dir %s",
+@@ -203,6 +208,21 @@
+    fd = shm_mkstemp(template);
+    if (fd != -1)
+       shm_unlink(template);
++#elif defined(__APPLE__)
++   /* the per-user temp dir, not /tmp/xdg-runtime-mesa-<uid>: processes of several users (and set-uid ones) share
++    * /tmp, and a directory one of them made refuses the others (XeGfx N-238); shm_open objects can be sized once
++    * only, and ANV grows its state table with ftruncate, so this stays a real, already unlinked file */
++   {
++      char dir[PATH_MAX - 32];
++      size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, dir, sizeof(dir));
++      char *name = NULL;
++
++      if (n > 0 && n < sizeof(dir) &&
++          asprintf(&name, "%smesa-shared-%s-XXXXXX", dir, debug_name ? debug_name : "anon") > 0 && name) {
++         fd = create_tmpfile_cloexec(name);
++         free(name);
++      }
++   }
+ #endif
+ 
+     /*

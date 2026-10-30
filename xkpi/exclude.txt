@@ -1,0 +1,16 @@
+# drm-kmod sources XeGfx must not build: GPL-only, or paired with a replacement under src/
+dma-buf.c                     # BSD itself, but built against GPL headers; replaced by src/dmabuf/nmx_dma_buf.c
+sync_file.c                   # GPL-2.0; kexts cannot create the fd anyway (sync_file.h here)
+dma-fence-unwrap.c            # GPL-2.0-only; replaced by src/dmabuf/nmx_dma_fence_unwrap.c
+drm_hdcp_helper.c             # GPL-2.0; display HDCP, i915 display stays off
+drm_writeback.c               # GPL-2.0; writeback connectors, unused by i915
+drm_panel_backlight_quirks.c  # GPL-2.0; panel quirks for the display code
+intel_uncore_trace.c          # GPL-2.0; tracepoints, no-ops here
+linux_schedule.c              # FreeBSD BSD-2; replaced by src/lkpi/linux_schedule.c (woken_wake_function lost wakeup, found by VedCloud)
+intel_breadcrumbs.c           # MIT; replaced by src/i915/intel_breadcrumbs.c (signal_irq_work takes the next signaler before the last context put)
+i915_gem_stolen.c             # MIT; replaced by src/i915/i915_gem_stolen.c (stolen allocator starts after the firmware console image)
+linux_page.c                  # FreeBSD BSD-2; replaced by src/lkpi/linux_page.c (vmap family maps at an address IOKit picks, N-221)
+intel_display_device.c        # MIT; replaced by src/i915/intel_display_device.c (xegfx_no_display tunable, N-223)
+intel_guc_submission.c        # MIT; replaced by src/i915/ with Linux 0323a5127e7c + c557fd1050f6 (GuC wakeref / g2h underflow, I-111)
+intel_engine_heartbeat.c      # MIT; replaced by src/i915/ with Linux 4c71fd099513 (heartbeat park double put, I-109)
+intel_gsc.c                   # MIT; replaced by src/i915/ with Linux 8cadce97bf26 (GSC top half with IRQs off)
