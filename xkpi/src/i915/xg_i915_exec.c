@@ -220,3 +220,102 @@ xg_i915_reserve_bootfb(unsigned long long offset, unsigned long long size)
 	mutex_unlock(&ggtt->vm.mutex);
 	return (err);
 }
+
+/*
+ * Zero-copy scanout (xezcflip): a few GGTT slots whose PTEs the accelerator points at a compositor frame's own pages,
+ * then writes PLANE_SURF itself. Based on Mountainatic/ArrowWhatever patches 0008/0009 (PolyForm Noncommercial).
+ */
+static struct drm_mm_node xg_flip_node[XG_FLIP_MAX_SLOTS];
+static unsigned int xg_flip_slots;
+static unsigned long long xg_flip_bytes;
+
+/* reserve up to `slots` slots of `surface_bytes` each below the GuC top (the plane addresses 32 bits); 0 or -errno */
+int
+xg_flip_init(unsigned long long surface_bytes, unsigned int slots, unsigned long long *ggtt_out,
+    unsigned int *count_out)
+{
+	struct drm_i915_private *i915;
+	struct pci_dev *pdev;
+	struct i915_ggtt *ggtt;
+	unsigned long long size;
+	unsigned int i, done = 0;
+	int err = 0;
+
+	if (ggtt_out == NULL || count_out == NULL || surface_bytes == 0)
+		return (-EINVAL);
+	if ((i915 = xg_i915_find(&pdev)) == NULL)
+		return (-ENODEV);
+	size = round_up(surface_bytes, I915_GTT_PAGE_SIZE);
+	if (xg_flip_slots != 0) {	/* already reserved: same slots if they are big enough */
+		if (xg_flip_bytes < size)
+			return (-ENOSPC);
+		for (i = 0; i < xg_flip_slots; i++)
+			ggtt_out[i] = xg_flip_node[i].start;
+		*count_out = xg_flip_slots;
+		return (0);
+	}
+	if (slots > XG_FLIP_MAX_SLOTS)
+		slots = XG_FLIP_MAX_SLOTS;
+	ggtt = to_gt(i915)->ggtt;
+	mutex_lock(&ggtt->vm.mutex);
+	for (i = 0; i < slots; i++) {
+		err = i915_gem_gtt_insert(&ggtt->vm, NULL, &xg_flip_node[i], size, I915_GTT_PAGE_SIZE,
+		    I915_COLOR_UNEVICTABLE, 0x80000000ULL, 0xfee00000ULL, PIN_NOEVICT);
+		if (err)
+			break;
+		ggtt_out[i] = xg_flip_node[i].start;
+		done++;
+	}
+	mutex_unlock(&ggtt->vm.mutex);
+	if (done == 0)
+		return (err != 0 ? err : -ENOSPC);
+	xg_flip_slots = done;
+	xg_flip_bytes = size;
+	*count_out = done;
+	return (0);
+}
+
+/* point a slot's PTEs at these 4 KiB physical pages, then one TLB invalidate for the slot */
+int
+xg_flip_map(unsigned int slot, unsigned long long surface_bytes, const unsigned long long *phys,
+    unsigned int npages)
+{
+	struct drm_i915_private *i915;
+	struct pci_dev *pdev;
+	struct i915_ggtt *ggtt;
+	unsigned int i, need, pat;
+
+	if (slot >= xg_flip_slots || phys == NULL || surface_bytes == 0 || surface_bytes > xg_flip_bytes)
+		return (-EINVAL);
+	if ((i915 = xg_i915_find(&pdev)) == NULL)
+		return (-ENODEV);
+	need = (unsigned int)(round_up(surface_bytes, I915_GTT_PAGE_SIZE) >> 12);
+	if (npages < need)
+		return (-EINVAL);
+	ggtt = to_gt(i915)->ggtt;
+	pat = i915_gem_get_pat_index(i915, I915_CACHE_NONE);	/* system memory, scanned by the display */
+	for (i = 0; i < need; i++)
+		ggtt->vm.insert_page(&ggtt->vm, (dma_addr_t)(phys[i] & ~0xfffULL),
+		    xg_flip_node[slot].start + ((u64)i << 12), pat, 0);
+	ggtt->invalidate(ggtt);
+	return (0);
+}
+
+/* the slot's PTEs back to the scratch page, so a stale frame cannot be scanned out */
+int
+xg_flip_unmap(unsigned int slot, unsigned long long surface_bytes)
+{
+	struct drm_i915_private *i915;
+	struct pci_dev *pdev;
+	struct i915_ggtt *ggtt;
+
+	if (slot >= xg_flip_slots || surface_bytes == 0 || surface_bytes > xg_flip_bytes)
+		return (-EINVAL);
+	if ((i915 = xg_i915_find(&pdev)) == NULL)
+		return (-ENODEV);
+	ggtt = to_gt(i915)->ggtt;
+	if (ggtt->vm.scratch_range != NULL)
+		ggtt->vm.scratch_range(&ggtt->vm, xg_flip_node[slot].start, round_up(surface_bytes, I915_GTT_PAGE_SIZE));
+	ggtt->invalidate(ggtt);
+	return (0);
+}

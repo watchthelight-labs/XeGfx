@@ -50,6 +50,11 @@ void xg_i915_map_init(void);
 int xg_i915_store(struct xg_i915_store *sd, int timeout_ms);
 /* keep i915 off the GGTT range the boot surface scans out of (Hybrid, display disabled); 0 or a negative errno */
 int xg_i915_reserve_bootfb(unsigned long long offset, unsigned long long size);
+/* zero-copy scanout: reserve GGTT slots, point one slot's PTEs at a frame's physical pages, or back at scratch; 0 or -errno */
+#define XG_FLIP_MAX_SLOTS	8
+int xg_flip_init(unsigned long long surface_bytes, unsigned int slots, unsigned long long *ggtt_out, unsigned int *count_out);
+int xg_flip_map(unsigned int slot, unsigned long long surface_bytes, const unsigned long long *phys, unsigned int npages);
+int xg_flip_unmap(unsigned int slot, unsigned long long surface_bytes);
 
 #ifdef __cplusplus
 }

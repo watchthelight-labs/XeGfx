@@ -154,6 +154,17 @@ XeGfxResident::callPlatformFunction(const OSSymbol *name, bool wait, void *p1, v
 		*(int *)p4 = xg_fd_remote_ioctl((int)(uintptr_t)p1, (unsigned long)p2, (unsigned long long)(uintptr_t)p3);
 		return kIOReturnSuccess;
 	}
+	/* "xgFlipInit" (surface bytes, slots wanted, u64 *ggtt out, unsigned *count out) / "xgFlipMap" (slot, phys page
+	 * array, npages, surface bytes) / "xgFlipUnmap" (slot, surface bytes): zero-copy scanout; the accelerator writes
+	 * PLANE_SURF, this side owns the GGTT slots and PTEs. Idle until XeGfxAccel runs with xezcflip=1. */
+	if (name && name->isEqualTo("xgFlipInit") && p3 && p4)
+		return xg_flip_init((unsigned long long)(uintptr_t)p1, (unsigned int)(uintptr_t)p2, (unsigned long long *)p3,
+		    (unsigned int *)p4) == 0 ? kIOReturnSuccess : kIOReturnError;
+	if (name && name->isEqualTo("xgFlipMap") && p2)
+		return xg_flip_map((unsigned int)(uintptr_t)p1, (unsigned long long)(uintptr_t)p4, (const unsigned long long *)p2,
+		    (unsigned int)(uintptr_t)p3) == 0 ? kIOReturnSuccess : kIOReturnError;
+	if (name && name->isEqualTo("xgFlipUnmap"))
+		return xg_flip_unmap((unsigned int)(uintptr_t)p1, (unsigned long long)(uintptr_t)p2) == 0 ? kIOReturnSuccess : kIOReturnError;
 	/* "xgTrace" (const char *line): XeGfxAccel's state, stored with the console trace (thread context only) */
 	if (name && name->isEqualTo("xgTrace") && p1 && gLogLock) {
 		IOInterruptState is = IOSimpleLockLockDisableInterrupt(gLogLock);

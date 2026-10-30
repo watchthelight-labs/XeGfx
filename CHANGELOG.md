@@ -4,6 +4,15 @@ Versions are the kext's `CFBundleVersion`. "Booted" means the version ran on the
 
 ## Unreleased (plugin, booted: N-319, N-320)
 
+- Zero-copy flip of the Intel panel frame, off unless the boot-arg `xezcflip=1` is set (built, not booted). XeGfx reserves three GGTT
+  slots below the GuC top and exposes `xgFlipInit/xgFlipMap/xgFlipUnmap` on XeGfxResident; XeGfxAccel then maps a finished frame's
+  pages into a free slot, writes PLANE_SURF, waits until PLANE_SURFLIVE shows the new address (40 ms at most) and only then releases
+  the older frames. The wait for the frame to be complete is the copy path's per-surface one (`nvSurfWaitReady`,
+  `nvAccelSurfCopyReady`), not a global GPU-idle poll. Any frame that does not fit (other pitch, no slot, refusal) is copied after the
+  plane is put back on the boot scanout. `debug.nvaccel_iop_zcflip` switches it live; counters `debug.nvaccel_iop_zc_*`. Based on
+  Mountainatic/ArrowWhatever patches 0008/0009 (PolyForm Noncommercial). Not done: their deferred worker that arms the plane off
+  WindowServer's thread (the thing that took them from 15 to 60 fps); the flip here is armed synchronously on the display thread.
+
 - Horizontal bands across the desktop while typing or scrolling are gone (I-119). An app's render pass or IOSurface write
   on ANV could still be running when WindowServer composited the surface, so a half-drawn frame reached the screen.
   On Intel, every process except WindowServer now waits at commit for command buffers that render or write an IOSurface.

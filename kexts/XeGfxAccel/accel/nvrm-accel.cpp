@@ -1347,6 +1347,7 @@ static void nvXeVblSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_pipe);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_hit);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_miss);
 }
+static void nvXeZcSysctls(void);
 static IOMemoryMap *gXeMmio;
 static uint64_t nvXeUs(uint64_t t0) { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns); return ns / 1000; }
 // Waits (at most 25 ms) until the transcoder showing an h-line mode is in vblank. Read-only: TRANSCONF, TRANS_VTOTAL
@@ -1378,6 +1379,135 @@ static bool nvXeWaitVblank(IOPCIDevice *pci, unsigned h)
     }
     gIopVblWaitUs = (int)nvXeUs(t0);
     return true;
+}
+
+// <wtl>
+// Zero-copy flip of an Intel panel frame (boot-arg xezcflip=1, off by default). Instead of copying the frame into the
+// boot scanout, XeGfx maps its pages into a reserved GGTT slot ("xgFlipMap") and PLANE_SURF points the plane at it.
+// By the time we get here the copy path's wait has run (nvSurfWaitReady, nvAccelSurfCopyReady), so the frame is complete
+// in memory: that per-surface wait replaces ArrowWhatever's global GPU-idle poll. The plane latches the new address at
+// the next vblank (PLANE_SURFLIVE shows it); only then are the frames scanned before it released. The surface and its
+// pages stay held while they can be on the panel. Based on Mountainatic/ArrowWhatever patches 0008/0009.
+static int gIopZc;
+static IOLock *gZcLock;
+static unsigned long long gZcGgtt[8], gZcBytes, gZcPhys[4224];
+static unsigned gZcSlots, gZcLive = ~0u;
+static uint32_t gZcBootSurf;
+struct NVZcHeld { IOSurface *s; IOMemoryDescriptor *md; unsigned slot; };
+static NVZcHeld gZcHeld[4];
+static unsigned gZcHeldN;
+static SInt64 gCntZcFlip, gCntZcFallback, gCntZcLatchMiss, gCntZcRestore, gCntZcFail;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_zcflip, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopZc, 0,
+           "1 = flip Intel panel frames through GGTT slots instead of copying them (boot-arg xezcflip=1); 0 goes back to the copy");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_zc_flips, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntZcFlip, "Intel panel frames flipped without a copy");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_zc_fallback, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntZcFallback, "frames that took the copy path while zero-copy was on");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_zc_latch_miss, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntZcLatchMiss, "flips whose address the plane had not taken after 40 ms");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_zc_restore, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntZcRestore, "returns to the boot scanout");
+SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_zc_fail, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntZcFail, "flips refused by XeGfx or the surface");
+static void nvXeZcSysctls(void)
+{
+    int z = 0;
+    if (PE_parse_boot_argn("xezcflip", &z, sizeof z)) gIopZc = z ? 1 : 0;
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_zcflip);     sysctl_register_oid(&sysctl__debug_nvaccel_iop_zc_flips);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_zc_fallback); sysctl_register_oid(&sysctl__debug_nvaccel_iop_zc_latch_miss);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_zc_restore); sysctl_register_oid(&sysctl__debug_nvaccel_iop_zc_fail);
+}
+static IOReturn nvXeZcCall(const char *fn, void *p1, void *p2, void *p3, void *p4)
+{
+    static IOService *res;
+    if (!res) { OSDictionary *m = IOService::serviceMatching("XeGfxResident"); if (m) { res = IOService::waitForMatchingService(m, 1000ULL * 1000 * 1000); m->release(); } }
+    if (!res) return kIOReturnNotAttached;
+    const OSSymbol *sym = OSSymbol::withCString(fn);
+    if (!sym) return kIOReturnNoMemory;
+    IOReturn r = res->callPlatformFunction(sym, false, p1, p2, p3, p4);
+    sym->release();
+    return r;
+}
+// the plane's live address equals `want` (bits 31:12), at most 40 ms; the plane latches a new SURF at the next vblank
+static bool nvXeZcLatched(volatile uint32_t *r, uint32_t surflive, uint32_t want)
+{
+    for (int i = 0; i < 400; i++) { if ((r[surflive / 4] & ~0xfffu) == (want & ~0xfffu)) return true; IODelay(100); }
+    return false;
+}
+static void nvXeZcReleaseOthers(unsigned keepSlot)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < gZcHeldN; i++) {
+        NVZcHeld &h = gZcHeld[i];
+        if (h.slot == keepSlot) { gZcHeld[n++] = h; continue; }
+        if (h.slot < 8) nvXeZcCall("xgFlipUnmap", (void *)(uintptr_t)h.slot, (void *)(uintptr_t)gZcBytes, nullptr, nullptr);
+        if (h.md) h.md->complete();
+        if (h.s) ((OSObject *)h.s)->release();
+    }
+    gZcHeldN = n;
+}
+// back to the boot scanout before a copied frame is written there
+static void nvXeZcRestore(volatile uint32_t *r, int p)
+{
+    if (!gZcHeldN || gZcLive == ~0u) return;
+    const uint32_t surf = 0x7019c + p * 0x1000, live = 0x701ac + p * 0x1000;
+    r[surf / 4] = gZcBootSurf;
+    if (nvXeZcLatched(r, live, gZcBootSurf)) { gZcLive = ~0u; nvXeZcReleaseOthers(~0u); }
+    else OSAddAtomic64(1, &gCntZcLatchMiss);
+    OSAddAtomic64(1, &gCntZcRestore);
+}
+static bool nvAccelXeZcFlip(IOPCIDevice *pci, IOSurface *s, unsigned h, unsigned pitch)
+{
+    volatile uint32_t *r = gXeMmio ? (volatile uint32_t *)gXeMmio->getVirtualAddress() : nullptr;
+    const int p = gIopVblPipe;
+    if (!r || p < 0 || !s) return false;
+    if (!gZcLock) gZcLock = IOLockAlloc();
+    if (!gZcLock) return false;
+    const uint32_t surf = 0x7019c + p * 0x1000, live = 0x701ac + p * 0x1000;
+    const unsigned long long bytes = (unsigned long long)pitch * h;
+    bool ok = false;
+    IOLockLock(gZcLock);
+    do {
+        if (!gIopZc) { nvXeZcRestore(r, p); break; }
+        if (!gZcSlots) {
+            unsigned n = 0;
+            if (nvXeZcCall("xgFlipInit", (void *)(uintptr_t)bytes, (void *)(uintptr_t)3, gZcGgtt, &n) != kIOReturnSuccess || !n) { OSAddAtomic64(1, &gCntZcFail); gIopZc = 0; ALOG("iop: zero-copy flip: no GGTT slots, back to the copy path"); break; }
+            gZcSlots = n; gZcBytes = bytes;
+            ALOG("iop: zero-copy flip: %u GGTT slots x %llu bytes (first 0x%llx)", n, bytes, gZcGgtt[0]);
+        }
+        if (bytes > gZcBytes || gZcHeldN >= 4) break;
+        unsigned slot = ~0u;
+        for (unsigned i = 0; i < gZcSlots && slot == ~0u; i++) {
+            bool used = false;
+            for (unsigned k = 0; k < gZcHeldN; k++) used |= gZcHeld[k].slot == i;
+            if (!used) slot = i;
+        }
+        if (slot == ~0u) break;
+        IOMemoryDescriptor *md = s->getMemoryDescriptor();   // unretained
+        if (!md || md->getLength() < bytes || md->prepare(kIODirectionNone) != kIOReturnSuccess) { OSAddAtomic64(1, &gCntZcFail); break; }
+        const unsigned need = (unsigned)((bytes + 4095ull) >> 12);
+        unsigned npages = 0;
+        if (need <= 4224) {
+            for (IOByteCount off = 0; off < (IOByteCount)bytes && npages < need; ) {
+                IOByteCount seg = 0;
+                addr64_t pa = md->getPhysicalSegment(off, &seg, kIOMemoryMapperNone);
+                if (!pa || !seg) break;
+                for (IOByteCount o = 0; o + 4096 <= seg && npages < need; o += 4096) gZcPhys[npages++] = pa + o;
+                off += seg;
+            }
+        }
+        if (npages < need || nvXeZcCall("xgFlipMap", (void *)(uintptr_t)slot, gZcPhys, (void *)(uintptr_t)npages, (void *)(uintptr_t)bytes) != kIOReturnSuccess) {
+            md->complete(); OSAddAtomic64(1, &gCntZcFail); break;
+        }
+        if (!gZcHeldN && gZcLive == ~0u) gZcBootSurf = r[surf / 4];   // what the copy path was scanning
+        ((OSObject *)s)->retain();
+        gZcHeld[gZcHeldN++] = { s, md, slot };
+        const uint32_t want = (uint32_t)gZcGgtt[slot];
+        r[surf / 4] = (want & ~0xfffu) | (r[surf / 4] & 0xfffu);
+        gZcLive = slot;
+        if (nvXeZcLatched(r, live, want)) nvXeZcReleaseOthers(slot);
+        else OSAddAtomic64(1, &gCntZcLatchMiss);   // the older frames stay held until a later flip latches
+        OSAddAtomic64(1, &gCntZcFlip);
+        ok = true;
+    } while (0);
+    IOLockUnlock(gZcLock);
+    if (!ok) OSAddAtomic64(1, &gCntZcFallback);
+    return ok;
 }
 // </wtl>
 #endif
@@ -1450,6 +1580,18 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) NVIOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
     if (w != q.width || h != q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
 
+#ifdef NMX_XEGFX
+    if (head == 4 && s && !fromRes) {
+        // zero-copy: same size and pitch as the boot scanout, otherwise (or on any refusal) the frame is copied
+        if (gIopZc && pitch == q.pitch && nvAccelXeZcFlip(a->fPCI, s, h, pitch)) {
+            OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
+            return kIOReturnSuccess;
+        }
+        if (gZcHeldN && gXeMmio && gIopVblPipe >= 0) {   // the plane still shows a flipped frame: put the boot scanout back first
+            IOLockLock(gZcLock); nvXeZcRestore((volatile uint32_t *)gXeMmio->getVirtualAddress(), gIopVblPipe); IOLockUnlock(gZcLock);
+        }
+    }
+#endif
     nvAccelIopHome(fb, head);
     const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
@@ -1710,6 +1852,9 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_blank);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_skip);
 #ifdef NMX_XEGFX
     nvXeVblSysctls();
+#ifdef NMX_XEGFX
+    nvXeZcSysctls();
+#endif
 #endif
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip);       sysctl_register_oid(&sysctl__debug_nvaccel_iop_flips);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_flip_lock);
