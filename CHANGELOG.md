@@ -2,6 +2,16 @@
 
 Versions are the kext's `CFBundleVersion`. "Booted" means the version ran on the test laptop (Legion 5 15IAX10, Arrow Lake iGPU `8086:7D67`); "built" means it compiled and has not been run. Prereleases with a binary: v0.0.27, v0.0.35, v0.0.36, v0.0.38, v0.0.45 and v0.0.46.
 
+## Unreleased (plugin, booted: N-319, N-320)
+
+- Horizontal bands across the desktop while typing or scrolling are gone (I-119). An app's render pass or IOSurface write
+  on ANV could still be running when WindowServer composited the surface, so a half-drawn frame reached the screen.
+  On Intel, every process except WindowServer now waits at commit for command buffers that render or write an IOSurface.
+  Writing 64 to `/Library/GPUBundles/nvmtl/xe-live` turns this off live for A/B tests. N-320: no bands with it on,
+  bands within seconds with it off. mtlbench under load stays at 4.6 to 5.0 ms per frame.
+- WindowServer waiting for its own command buffers (N-318) and a GPU barrier at the start of each command buffer
+  (N-317) did not help; the barrier is still in, `NVMTL_XE_CB_BARRIER=0` turns it off.
+
 ## 0.0.46 (booted: N-300 to N-302)
 
 - A userptr page that is being freed is never wired again (I-121). `vm_page_unwire` dropped the last wiring before `vm_page_free` took the run out of the table, so a new hold on the same page could take the count from 0 to 1 in between and `vm_page_free` panicked with "freeing wired page". It happened at the restart that ended N-299 after 5.6 hours under load. The restart that ended N-300, with the desktop live under the same load, did not panic.
