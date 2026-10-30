@@ -5170,7 +5170,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 // I-119 bisect: WindowServer waits for the command buffers whose encoder kinds match the mask in this file (1 blit,
 // 2 compute, 4 render, 8 every one; 16 applies it to other processes, 32 to them only), re-read while it runs, so a
 // wait can be toggled without restarting WindowServer.
-static unsigned nvmtl_xe_live_mask(void) {
+static unsigned nvmtl_xe_live_mask_r(int raw) {
     static _Atomic unsigned mask; static _Atomic uint64_t checked; static long mt = -1;
     static int ws = -1; if (ws < 0) ws = getprogname() && !strcmp(getprogname(), "WindowServer");
     const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -5185,12 +5185,26 @@ static unsigned nvmtl_xe_live_mask(void) {
         if (fresh && m != atomic_exchange(&mask, m)) nvlog("xe-live wait mask %u", m);
     }
     const unsigned m = atomic_load(&mask);
+    if (raw) return m;
     if (ws ? (m & 32) : !(m & 48)) return 0;
     return m;
 }
+static unsigned nvmtl_xe_live_raw(void) { return nvmtl_xe_live_mask_r(1); }
+static unsigned nvmtl_xe_live_mask(void) { return nvmtl_xe_live_mask_r(0); }
+// I-119: on ANV an app's render pass or IOSurface write could still be running when WindowServer composited the
+// surface, which showed as horizontal bands; apps on Intel now wait for those at commit (bit 64 in xe-live turns it off).
+static int nvmtl_xe_app_wait(void) {
+    static int on = -1;
+    if (on < 0) on = nvmtl_vk_vendor() == 0x8086 && !(getprogname() && !strcmp(getprogname(), "WindowServer"));
+    return on;
+}
 - (void)commit {
+    BOOL surf = _surfDirty.count > 0;
+    if (!surf) for (NVMTLSubmissionPart *p in _parts) if ([p isKindOfClass:[NVMTLSubmissionPart class]] && p->surfaces.count) { surf = YES; break; }
     [self nvmtlSubmitWithEvents];
-    { const unsigned m = nvmtl_xe_live_mask(); if (m && ((m & 8) || (_xeKinds & m))) [self waitUntilCompleted]; }
+    { const unsigned m = nvmtl_xe_live_mask();
+      if ((m && ((m & 8) || (_xeKinds & m))) || (nvmtl_xe_app_wait() && !(nvmtl_xe_live_raw() & 64) && (surf || (_xeKinds & 4))))
+          [self waitUntilCompleted]; }
     // NVMTL_DEBUG_WAIT_EACH=1: every command buffer is waited for and its completion traced, so a GPU hang is pinned to
     // the command buffer (and the debug groups traced before it) that never finished. A diagnostic: it serialises the app.
     static int each = -1; if (each < 0) { const char *e = getenv("NVMTL_DEBUG_WAIT_EACH"); each = e && e[0] == '1'; }
