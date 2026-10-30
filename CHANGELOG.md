@@ -4,6 +4,13 @@ Versions are the kext's `CFBundleVersion`. "Booted" means the version ran on the
 
 ## Unreleased (plugin, booted: N-319, N-320)
 
+- XeGfxIntelFB: optional brightness handler, off unless the boot-arg `xeintelbl` is set (built, not booted). `xeintelbl=0` publishes
+  it and only logs what macOS sends for `brightness` and `linear-brightness`, plus a read of the panel's eDP DPCD 0x702 and
+  0x720-0x723 over AUX A. `xeintelbl=1` also writes the level to DPCD 0x722/0x723: the slider sets the user level, a
+  `brightness` of 3 or less dims to half of it (0 is off), a larger value restores it, and the stored display parameters are
+  rewritten after changes and six times in the first 80 s after boot. Writes stay off when the panel does not report
+  brightness set over AUX. Idea after zep245/IrisXe-macos-driver (observations only, no code).
+
 - Horizontal bands across the desktop while typing or scrolling are gone (I-119). An app's render pass or IOSurface write
   on ANV could still be running when WindowServer composited the surface, so a half-drawn frame reached the screen.
   On Intel, every process except WindowServer now waits at commit for command buffers that render or write an IOSurface.

@@ -4,6 +4,8 @@
 // <wtl> fork: nvgfx | author: watchthelight </wtl>
 #include <IOKit/ndrvsupport/IONDRVFramebuffer.h>
 #include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/graphics/IODisplay.h>
+#include <IOKit/IOMessage.h>
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
@@ -153,9 +155,172 @@ static uint32_t xifbSnapHz(const uint8_t *e, int len, uint32_t meas)
     return (meas && bd > meas / 50) ? meas : best;    // more than 2 % off: keep the measurement
 }
 
+// eDP DPCD over AUX A (native read 0x9, write 0x8), for the panel's backlight registers. AUX is used from one thread at
+// a time under gBlLock; the register map is kept only when xeintelbl is set.
+#define XIFB_DPCD_BL_CAP  0x702   // bit1 brightness set over AUX, bit2 backlight enable over AUX, bit3 two-byte level
+#define XIFB_DPCD_BL_CTL  0x720   // bit0 backlight enable
+#define XIFB_DPCD_BL_MODE 0x721   // bits 1:0: 2 = brightness from DPCD
+#define XIFB_DPCD_BL_MSB  0x722
+static volatile uint32_t *gBlRegs;
+static IOLock *gBlLock;
+static int xifbDpcd(bool wr, uint32_t addr, uint8_t *buf, int n)
+{
+    uint8_t tx[20] = { (uint8_t)(((wr ? 0x8 : 0x9) << 4) | ((addr >> 16) & 0xf)), (uint8_t)(addr >> 8), (uint8_t)addr, (uint8_t)(n - 1) }, rx[20];
+    int ntx = 4;
+    if (wr) for (int i = 0; i < n; i++) tx[ntx++] = buf[i];
+    volatile uint32_t *save = gRegs; gRegs = gBlRegs;
+    int r = -1;
+    for (int t = 0; t < 4 && gRegs; t++) {
+        int got = xifbAux(tx, ntx, rx, wr ? 1 : n + 1);
+        if (got >= 1 && !(rx[0] & 0xf0)) { if (!wr) bcopy(rx + 1, buf, n); r = 0; break; }
+        IODelay(500);
+    }
+    gRegs = save;
+    return r;
+}
+static int xifbDpcdRead(uint32_t addr, uint8_t *buf, int n) { return xifbDpcd(false, addr, buf, n); }
+static int xifbDpcdWrite(uint32_t addr, uint8_t *buf, int n) { return xifbDpcd(true, addr, buf, n); }
+
+// The panel's brightness control, modelled on NVRMBacklightHandler. xeintelbl=0 only logs what macOS sends and reads
+// the DPCD registers; xeintelbl=1 writes the level. The rules are zep245's observations of what Tahoe sends, in our own
+// words: linear-brightness is the user's level, brightness <= 3 is a dim (1) or off (0) request, any other brightness
+// value is macOS handing back a stored number and means the user's level again.
+class XeBacklightHandler : public IODisplayParameterHandler {
+    OSDeclareDefaultStructors(XeBacklightHandler)
+    thread_call_t fApply = nullptr, fSync = nullptr;
+    volatile SInt32 fPending = -1;
+    SInt32 fUser = 100;
+    bool fWrite = false, fTwoByte = false, fCanSet = false;
+    IODisplay *fDisp = nullptr;
+    volatile SInt32 fSyncLeft = 0;
+    static void applyFire(thread_call_param_t me, thread_call_param_t) { ((XeBacklightHandler *)me)->apply(); }
+    static void syncFire(thread_call_param_t me, thread_call_param_t) { ((XeBacklightHandler *)me)->resync(); }
+    void apply();
+    void resync();
+    void later(uint32_t ms) {
+        uint64_t dl; clock_interval_to_deadline(ms, kMillisecondScale, &dl); thread_call_enter_delayed(fSync, dl);
+    }
+public:
+    static XeBacklightHandler *make(bool write);
+    bool setDisplay(IODisplay *display) override;
+    bool doIntegerSet(OSDictionary *params, const OSSymbol *paramName, UInt32 value) override;
+    bool doDataSet(const OSSymbol *, OSData *) override { return false; }
+    bool doUpdate() override { return true; }
+    void free() override;
+};
+OSDefineMetaClassAndStructors(XeBacklightHandler, IODisplayParameterHandler)
+
+XeBacklightHandler *XeBacklightHandler::make(bool write)
+{
+    XeBacklightHandler *h = OSTypeAlloc(XeBacklightHandler);
+    if (!h || !h->init()) { OSSafeReleaseNULL(h); return nullptr; }
+    h->fWrite = write;
+    uint8_t cap = 0, reg[4] = {};
+    int rc = xifbDpcdRead(XIFB_DPCD_BL_CAP, &cap, 1);
+    int r2 = xifbDpcdRead(XIFB_DPCD_BL_CTL, reg, 4);
+    XIFBLOG("backlight: DPCD 0x702 %s%02x, 0x720..0x723 %s%02x %02x %02x %02x", rc ? "(read failed) " : "", cap,
+            r2 ? "(read failed) " : "", reg[0], reg[1], reg[2], reg[3]);
+    h->fCanSet = !rc && (cap & 2);
+    h->fTwoByte = !rc && (cap & 8);
+    if (!r2) {
+        uint32_t lvl = h->fTwoByte ? (uint32_t)(reg[2] << 8 | reg[3]) : reg[2], mx = h->fTwoByte ? 0xffffu : 0xffu;
+        if (lvl) h->fUser = (SInt32)((lvl * 100 + mx / 2) / mx);
+        XIFBLOG("backlight: firmware level %u/%u = %d%%, %s", lvl, mx, (int)h->fUser, (reg[0] & 1) ? "enabled" : "disabled");
+    }
+    if (write && !h->fCanSet) XIFBLOG("backlight: panel does not report brightness set over AUX (0x702 bit 1): writes stay off");
+    h->fApply = thread_call_allocate(applyFire, h);
+    h->fSync = thread_call_allocate(syncFire, h);
+    if (!h->fApply || !h->fSync) { h->release(); return nullptr; }
+    return h;
+}
+void XeBacklightHandler::free()
+{
+    thread_call_t *cs[2] = { &fApply, &fSync };
+    for (int i = 0; i < 2; i++)
+        if (*cs[i]) { thread_call_cancel(*cs[i]); while (!thread_call_free(*cs[i])) { thread_call_cancel(*cs[i]); IOSleep(1); } *cs[i] = nullptr; }
+    OSSafeReleaseNULL(fDisp);
+    IODisplayParameterHandler::free();
+}
+bool XeBacklightHandler::setDisplay(IODisplay *display)
+{
+    if (!display) return false;
+    OSObject *old = display->copyProperty(gIODisplayParametersKey);
+    OSDictionary *cur = OSDynamicCast(OSDictionary, old);
+    OSDictionary *params = cur ? OSDictionary::withDictionary(cur) : OSDictionary::withCapacity(2);
+    OSSafeReleaseNULL(old);
+    if (!params) return false;
+    IODisplay::addParameter(params, gIODisplayBrightnessKey, 0, 100);
+    IODisplay::setParameter(params, gIODisplayBrightnessKey, fUser);
+    IODisplay::addParameter(params, gIODisplayLinearBrightnessKey, 0, 100);
+    IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, fUser);
+    display->setProperty(gIODisplayParametersKey, params);
+    params->release();
+    if (fWrite && !fDisp) {
+        display->retain(); fDisp = display;
+        fSyncLeft = 6;   // macOS restores its own saved slider at login: rewrite the parameters at 5, 20, 35, 50, 65, 80 s
+        later(5000);
+    }
+    XIFBLOG("backlight: brightness parameters on %s, level %d%%", display->getName(), (int)fUser);
+    return true;
+}
+bool XeBacklightHandler::doIntegerSet(OSDictionary *, const OSSymbol *paramName, UInt32 value)
+{
+    if (paramName != gIODisplayBrightnessKey && paramName != gIODisplayLinearBrightnessKey) return false;
+    const bool linear = paramName == gIODisplayLinearBrightnessKey;
+    SInt32 v = value > 100 ? 100 : (SInt32)value, panel = v;
+    static unsigned said;
+    if (linear) fUser = v;
+    else if (v > 3) { panel = fUser; if (fWrite && v != fUser) { fSyncLeft = 1; later(150); } }
+    else if (v > 0) panel = fUser / 2;   // dim like a MacBook, not macOS's 1
+    if (said++ < 64)
+        XIFBLOG("backlight: macOS set %s %u -> user %d%%, panel %d%%%s", linear ? "linear-brightness" : "brightness", (unsigned)value,
+                (int)fUser, (int)panel, fWrite ? "" : " (log only)");
+    if (fWrite) {
+        if (linear) { fSyncLeft = 1; later(300); }   // keep the stored parameters at the user's level
+        fPending = panel;
+        thread_call_enter(fApply);   // IODisplay calls here with the framebuffer lock held
+    }
+    return true;
+}
+void XeBacklightHandler::apply()
+{
+    SInt32 v;
+    do { v = fPending; } while (!OSCompareAndSwap((UInt32)v, (UInt32)-1, (volatile UInt32 *)&fPending));
+    if (v < 0 || !fCanSet || !gBlLock) return;
+    if (v > 0 && v < 5) v = 5;   // the panel minimum; 0 stays backlight off
+    uint32_t mx = fTwoByte ? 0xffffu : 0xffu, lvl = (uint32_t)v * mx / 100;
+    uint8_t b[2] = { (uint8_t)(lvl >> 8), (uint8_t)lvl }, c[2];
+    if (!fTwoByte) { b[0] = (uint8_t)lvl; }
+    IOLockLock(gBlLock);
+    int rc = 0;
+    if (xifbDpcdRead(XIFB_DPCD_BL_MODE, c, 1)) rc = -1;
+    else if ((c[0] & 3) != 2) { c[0] = (c[0] & ~3) | 2; rc = xifbDpcdWrite(XIFB_DPCD_BL_MODE, c, 1); }
+    if (!rc) rc = xifbDpcdWrite(XIFB_DPCD_BL_MSB, b, fTwoByte ? 2 : 1);
+    if (!rc && !xifbDpcdRead(XIFB_DPCD_BL_CTL, c, 1)) { c[0] = v ? (c[0] | 1) : (c[0] & ~1); rc = xifbDpcdWrite(XIFB_DPCD_BL_CTL, c, 1); }
+    IOLockUnlock(gBlLock);
+    static unsigned said; if (said++ < 32) XIFBLOG("backlight: wrote %d%% (0x%x)%s", (int)v, lvl, rc ? " FAILED" : "");
+}
+void XeBacklightHandler::resync()
+{
+    if (!fDisp || fSyncLeft <= 0) return;
+    OSObject *old = fDisp->copyProperty(gIODisplayParametersKey);
+    OSDictionary *cur = OSDynamicCast(OSDictionary, old);
+    OSDictionary *params = cur ? OSDictionary::withDictionary(cur) : nullptr;
+    OSSafeReleaseNULL(old);
+    if (params) {
+        IODisplay::setParameter(params, gIODisplayBrightnessKey, fUser);
+        IODisplay::setParameter(params, gIODisplayLinearBrightnessKey, fUser);
+        fDisp->setProperty(gIODisplayParametersKey, params);
+        params->release();
+        fDisp->messageClients(kIOMessageServicePropertyChange);   // clients re-read now, not when Control Center opens
+    }
+    if (--fSyncLeft > 0) later(15000);
+}
+
 class XeGfxIntelFramebuffer : public IONDRVFramebuffer {
     OSDeclareDefaultStructors(XeGfxIntelFramebuffer)
     uint8_t fEdid[256]; int fEdidLen = 0; uint32_t fHz16 = 0;
+    XeBacklightHandler *fBacklight = nullptr;
 public:
     IOService *probe(IOService *provider, SInt32 *score) override {
         int off = 0;
@@ -200,7 +365,19 @@ public:
                     fHz16 = fEdidLen ? xifbSnapHz(fEdid, fEdidLen, meas) : meas;
                     XIFBLOG("refresh measured %u.%02u Hz, reported %u.%02u Hz", meas >> 16, ((meas & 0xffff) * 100) >> 16,
                             fHz16 >> 16, ((fHz16 & 0xffff) * 100) >> 16);
-                    gRegs = nullptr; m->release();
+                    // xeintelbl: 0 logs what macOS sends for brightness, 1 also writes the panel. Absent: nothing (default).
+                    uint32_t bl = 0;
+                    if (PE_parse_boot_argn("xeintelbl", &bl, sizeof bl) && fEdidLen) {
+                        gBlRegs = gRegs;   // the map stays for the backlight's AUX writes
+                        if (!gBlLock) gBlLock = IOLockAlloc();
+                        if ((fBacklight = XeBacklightHandler::make(bl == 1))) {
+                            fBacklight->setName("backlight");
+                            if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); XIFBLOG("backlight: attach failed"); }
+                            else { fBacklight->registerService(kIOServiceSynchronous); XIFBLOG("backlight: handler published, %s", bl == 1 ? "writes on" : "log only"); }
+                        }
+                        gRegs = nullptr;
+                        if (!fBacklight) { gBlRegs = nullptr; m->release(); }
+                    } else { gRegs = nullptr; m->release(); }
                 }
         }
         return IONDRVFramebuffer::start(provider);
