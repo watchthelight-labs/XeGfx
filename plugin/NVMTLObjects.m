@@ -5168,23 +5168,25 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     return self.status != MTLCommandBufferStatusError;
 }
 // I-119 bisect: WindowServer waits for the command buffers whose encoder kinds match the mask in this file (1 blit,
-// 2 compute, 4 render, 8 every one), re-read while it runs, so a wait can be toggled without restarting WindowServer.
+// 2 compute, 4 render, 8 every one; 16 applies it to other processes, 32 to them only), re-read while it runs, so a
+// wait can be toggled without restarting WindowServer.
 static unsigned nvmtl_xe_live_mask(void) {
     static _Atomic unsigned mask; static _Atomic uint64_t checked; static long mt = -1;
     static int ws = -1; if (ws < 0) ws = getprogname() && !strcmp(getprogname(), "WindowServer");
-    if (!ws) return 0;
     const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (now - atomic_load(&checked) > 250000000ull) {
         atomic_store(&checked, now);
-        struct stat st; unsigned m = 0;
+        struct stat st; unsigned m = 0; int fresh = 1;
         if (stat("/Library/GPUBundles/nvmtl/xe-live", &st) == 0) {
-            if ((long)st.st_mtime == mt) return atomic_load(&mask);
-            mt = (long)st.st_mtime; FILE *f = fopen("/Library/GPUBundles/nvmtl/xe-live", "r");
-            if (f) { if (fscanf(f, "%u", &m) != 1) m = 0; fclose(f); }
+            if ((long)st.st_mtime == mt) fresh = 0;
+            else { mt = (long)st.st_mtime; FILE *f = fopen("/Library/GPUBundles/nvmtl/xe-live", "r");
+                   if (f) { if (fscanf(f, "%u", &m) != 1) m = 0; fclose(f); } }
         } else mt = -1;
-        if (m != atomic_exchange(&mask, m)) nvlog("xe-live wait mask %u", m);
+        if (fresh && m != atomic_exchange(&mask, m)) nvlog("xe-live wait mask %u", m);
     }
-    return atomic_load(&mask);
+    const unsigned m = atomic_load(&mask);
+    if (ws ? (m & 32) : !(m & 48)) return 0;
+    return m;
 }
 - (void)commit {
     [self nvmtlSubmitWithEvents];
