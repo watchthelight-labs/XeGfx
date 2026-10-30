@@ -5101,6 +5101,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                 e->_target->_parent != nil); } }
     // A target WindowServer samples inside its own pass: on Apple GPUs that read returns the pass's starting pixels
     // (tile memory), so give those draws a copy of the target taken before the pass begins.
+    if (e->_target) nvmtl_surface_cpu_dump(e->_target->_parent ?: e->_target);   // the final display surface is never sampled
     if (e->_target && d.colorAttachments[0].loadAction == MTLLoadActionLoad) {
         NVMTLTexture *r = e->_target->_parent ?: e->_target, *snap = nvmtl_self_snap(r, NO);
         if (snap && !(nvmtl_xe_live_mask_r(1) & 256) && !nvmtl_vk_cmd_copy_image(&_c, [r nvi], 0, 0, [snap nvi], 0, 0, [r nvi]->w, [r nvi]->h)) {
