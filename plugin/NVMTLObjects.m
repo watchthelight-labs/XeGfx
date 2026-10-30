@@ -19,6 +19,7 @@ static void nvtrace_emit(const char *fmt, ...) __attribute__((format(printf, 1, 
 // Guard the call site: converting NSString arguments on every draw is expensive
 // even when the trace writer immediately returns without emitting anything.
 #define nvtrace(...) do { if (nvmtl_trace_on()) nvtrace_emit(__VA_ARGS__); } while (0)
+static unsigned nvmtl_xe_live_mask_r(int raw);
 static unsigned long long nvmtl_global_trace_id(id o) {
     static char key; static unsigned long long next = 1;
     @synchronized (o) {
@@ -3429,6 +3430,10 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 - (void)setScissorRects:(const MTLScissorRect *)r count:(NSUInteger)n { if (r && n) [self setScissorRect:r[0]]; }
 - (void)setScissorRect:(MTLScissorRect)r {
     nvtrace("SC %lu %lu %lu %lu", (unsigned long)r.x, (unsigned long)r.y, (unsigned long)r.width, (unsigned long)r.height);
+    { static unsigned left; static int armed; const unsigned m = nvmtl_xe_live_mask_r(1);
+      if (!(m & 128)) armed = 0; else if (!armed) { armed = 1; left = 400; }
+      if ((m & 128) && left && getprogname() && !strcmp(getprogname(), "WindowServer")) { left--;
+          nvlog("xe-pass scissor %lu %lu %lu %lu", (unsigned long)r.x, (unsigned long)r.y, (unsigned long)r.width, (unsigned long)r.height); } }
     _sc[0] = (uint32_t)r.x; _sc[1] = (uint32_t)r.y; _sc[2] = (uint32_t)r.width; _sc[3] = (uint32_t)r.height; _hasSC = YES;
     if (!_begun) return;
     nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)r.x, (int32_t)r.y, (uint32_t)r.width, (uint32_t)r.height);
@@ -5059,6 +5064,16 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLRenderCommandEncoder *e = [NVMTLRenderCommandEncoder new];
     _nEnc++;
     e->_cb = self; e->_target = (NVMTLTexture *)d.colorAttachments[0].texture;
+    // I-119 cursor square: bit 128 in xe-live logs WindowServer's render passes (400 lines each time it is set).
+    { static unsigned left; static int armed; const unsigned m = nvmtl_xe_live_mask_r(1);
+      if (!(m & 128)) armed = 0; else if (!armed) { armed = 1; left = 400; }
+      if ((m & 128) && left && e->_target && getprogname() && !strcmp(getprogname(), "WindowServer")) { left--;
+          NVMTLTexture *r = e->_target->_parent ?: e->_target;
+          nvlog("xe-pass %ux%u surf %u load %lu store %lu clear %.2f/%.2f/%.2f/%.2f fmt %lu view %d", [r nvi]->w, [r nvi]->h,
+                r->_surf ? (unsigned)IOSurfaceGetID(r->_surf) : 0u, (unsigned long)d.colorAttachments[0].loadAction,
+                (unsigned long)d.colorAttachments[0].storeAction, d.colorAttachments[0].clearColor.red, d.colorAttachments[0].clearColor.green,
+                d.colorAttachments[0].clearColor.blue, d.colorAttachments[0].clearColor.alpha, (unsigned long)e->_target.pixelFormat,
+                e->_target->_parent != nil); } }
     if (!_resources) _resources = [NVMTLResSet new];
     if (e->_target) [_resources addObject:e->_target];
     if (d.depthAttachment.texture) [_resources addObject:d.depthAttachment.texture];
