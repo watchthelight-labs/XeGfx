@@ -120,7 +120,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 #if defined(NMX_ACCEL) && defined(NMX_XEGFX)
 // the same accelerator over XeGfx (Intel Xe, branch xe): its own bundle id, matched only after XeGfx claims the GPU
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.6", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.7", _start, _stop) }
 #elif defined(NMX_ACCEL)
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 #else
@@ -1385,6 +1385,35 @@ static int nvaccel_mmio_win_sysctl SYSCTL_HANDLER_ARGS
     return SYSCTL_OUT(req, v, sizeof v);
 }
 SYSCTL_PROC(_debug, OID_AUTO, nvaccel_mmio_win, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_mmio_win_sysctl, "S", "64 registers from mmio_addr");
+// I-119: the GOP maps the scanout buffer in the GGTT with PAT 0 (write-back); the display engine reads memory around
+// that cache, so lines our copy keeps rewriting (around a moving cursor) reach the panel late. Writing 0-3 here moves
+// the scanout's PTEs to that PAT index (1 = write-through, as i915 maps scanout); reading gives the first PTE's index.
+static int nvaccel_fb_pat_sysctl SYSCTL_HANDLER_ARGS
+{
+    if (!gXeMmio || gXeMmio->getLength() < 0x1000000) return ENOENT;
+    volatile uint32_t *r = (volatile uint32_t *)gXeMmio->getVirtualAddress();
+    volatile uint64_t *gtt = (volatile uint64_t *)((volatile uint8_t *)r + 0x800000);
+    const int p = gIopVblPipe < 0 ? 0 : gIopVblPipe;
+    const uint32_t surf = r[(0x7019C + p * 0x1000) / 4] & ~0xfffu;
+    const uint64_t bytes = (uint64_t)(r[(0x70188 + p * 0x1000) / 4] & 0x7ff) * 64 * (((r[(0x70190 + p * 0x1000) / 4] >> 16) & 0xfff) + 1);
+    const uint32_t first = surf >> 12, n = (uint32_t)((bytes + 4095) >> 12);
+    if (!n || (uint64_t)(first + n) * 8 > 0x800000) return EINVAL;
+    int pat = (int)((gtt[first] >> 52) & 3);
+    int err = sysctl_handle_int(oidp, &pat, 0, req);
+    if (err || !req->newptr) return err;
+    if (pat < 0 || pat > 3) return EINVAL;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint64_t v = gtt[first + i];
+        if (v & 1) gtt[first + i] = (v & ~(3ull << 52)) | ((uint64_t)pat << 52);
+    }
+    (void)gtt[first + n - 1];
+    r[0x101008 / 4] = 1;   // GFX_FLSH_CNTL: GGTT TLB invalidate
+    r[0xcee8 / 4] = 1;     // GuC TLB invalidate (GuC is on)
+    ALOG("iop: scanout GGTT 0x%x, %u PTEs now PAT %d", surf, n, pat);
+    return 0;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_fb_pat, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, 0, 0, nvaccel_fb_pat_sysctl, "I", "PAT index of the scanout buffer's GGTT entries (write 0-3)");
+
 static void nvXeVblSysctls(void)
 {
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vblsync);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us);
@@ -1395,7 +1424,7 @@ static void nvXeVblSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us_max); sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_wait_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_pipe);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_hit);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_miss);
-    sysctl_register_oid(&sysctl__debug_nvaccel_mmio_addr);     sysctl_register_oid(&sysctl__debug_nvaccel_mmio_win);
+    sysctl_register_oid(&sysctl__debug_nvaccel_mmio_addr);     sysctl_register_oid(&sysctl__debug_nvaccel_mmio_win); sysctl_register_oid(&sysctl__debug_nvaccel_fb_pat);
 }
 static uint64_t nvXeUs(uint64_t t0) { uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns); return ns / 1000; }
 // Waits (at most 25 ms) until the transcoder showing an h-line mode is in vblank. Read-only: TRANSCONF, TRANS_VTOTAL
