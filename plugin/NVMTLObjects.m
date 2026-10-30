@@ -1,3 +1,4 @@
+#include <sys/sysctl.h>
 /*
  * NullMoth NVIDIA driver for macOS
  * Copyright (c) 2026 NullMoth Systems.
@@ -5262,9 +5263,24 @@ static int nvmtl_xe_app_wait(void) {
     if (on < 0) on = nvmtl_vk_vendor() == 0x8086 && !(getprogname() && !strcmp(getprogname(), "WindowServer"));
     return on;
 }
+// I-119 probe (xe-live bit 1024): a panel copy (debug.nvaccel_iop_ok) between a WindowServer render commit and its GPU
+// completion means the kernel may have copied a frame the GPU was still drawing.
+static void nvmtl_xe_race_watch(NVMTLCommandBuffer *cb) {
+    static int ws = -1; if (ws < 0) ws = getprogname() && !strcmp(getprogname(), "WindowServer");
+    if (!ws || !(cb->_xeKinds & 4) || !(nvmtl_xe_live_raw() & 1024)) return;
+    int64_t c0 = 0; size_t l = sizeof c0;
+    if (sysctlbyname("debug.nvaccel_iop_ok", &c0, &l, NULL, 0)) return;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+        static _Atomic unsigned long total, raced; int64_t c1 = 0; size_t l1 = sizeof c1;
+        if (sysctlbyname("debug.nvaccel_iop_ok", &c1, &l1, NULL, 0)) return;
+        const unsigned long r = atomic_fetch_add(&raced, c1 != c0) + (c1 != c0), t = atomic_fetch_add(&total, 1) + 1;
+        if (t % 100 == 0) nvlog_raw("xe-race %lu/%lu render CBs saw a panel copy before they finished (mask %u)", r, t, nvmtl_xe_live_raw());
+    }];
+}
 - (void)commit {
     BOOL surf = _surfDirty.count > 0;
     if (!surf) for (NVMTLSubmissionPart *p in _parts) if ([p isKindOfClass:[NVMTLSubmissionPart class]] && p->surfaces.count) { surf = YES; break; }
+    nvmtl_xe_race_watch(self);
     [self nvmtlSubmitWithEvents];
     { const unsigned m = nvmtl_xe_live_mask();
       if ((m && ((m & 8) || (_xeKinds & m))) || (nvmtl_xe_app_wait() && !(nvmtl_xe_live_raw() & 64) && (surf || (_xeKinds & 4))))
