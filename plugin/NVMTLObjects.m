@@ -3221,6 +3221,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_cpu_dump(nt->_parent ? nt->_parent : nt);
     nvmtl_surface_in_for_cb(_cb, nt);
+    // the pass samples its own target: its draws need a barrier first (nvmtl_self_tex_barrier); xe-live bit 256 turns it off
+    if (_target && (nt->_parent ?: nt) == (_target->_parent ?: _target) && !(nvmtl_xe_live_mask_r(1) & 256)) _cb->_c.self_tex = 1;
     { NVMTLTexture *rt = nt->_parent ? nt->_parent : nt; nvtrace("FTEX[%lu] %ux%u surf %u view %d", (unsigned long)i, [nt nvi]->w, [nt nvi]->h,
         rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u, nt->_parent != nil); }
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_tbView, nt->_tbStorage);

@@ -68,6 +68,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  unsigned in_rp, occlusion_reset; uint32_t wseq;
                  void *fetchview[NVMTL_NCOL];   /* the open pass's colour views, read by [[color(n)]] framebuffer fetch */
                  unsigned fetch_draw, topo;   /* the bound pipeline reads [[color(n)]] in this pass; last MTLPrimitiveType set */
+                 unsigned self_tex;   /* a texture bound in the open pass is also its colour attachment */
                  // <wtl>
                  /* the last framebuffer fetch set made in this command buffer and what it points at: a draw whose pass
                     and mask are the same reuses it (Core Animation draws hundreds of fetch draws per pass) */

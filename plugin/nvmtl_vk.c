@@ -3341,6 +3341,15 @@ static void nvmtl_fetch_barrier(nvk_cmdbuf *c)
                           VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
 }
 // <wtl>
+static void nvmtl_self_tex_barrier(nvk_cmdbuf *c)
+{
+    // A draw that samples its own pass's attachment must see the earlier draws: Intel's render cache is not coherent
+    // with the sampler, so without this WindowServer's software cursor read stale display pixels (a square trail).
+    if (!c->self_tex || !c->in_rp || !nvmtl_fbfetch_on()) return;
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, NULL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                          VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+}
 static VkDescriptorSet nvmtl_fetch_set_make(nvk_cmdbuf *c, uint32_t mask);
 static VkDescriptorSet nvmtl_fetch_set(nvk_cmdbuf *c, uint32_t mask)
 {
@@ -3814,7 +3823,7 @@ static VkResult nvmtl_make_render_pass(const nvk_pipeline *p, uint32_t load, VkR
         { 0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 },
         { 0, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT } };
+          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT, VK_DEPENDENCY_BY_REGION_BIT } };
     VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, n, atts, 1, &sp, fetch ? 3u : 2u, deps };
     return pvkCreateRenderPass(g_dev, &rpci, NULL, out);
 }
@@ -5169,7 +5178,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
               memset(c->pt_fs[c->pt_n], 0, sizeof c->pt_fs[c->pt_n]); }
       } }
     pvkCmdBeginRenderPass(c->cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
-    c->in_rp = 1;
+    c->in_rp = 1; c->self_tex = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) c->fetchview[i] = (i < ncol && cf[i]) ? ps->colview[i] : NULL;
     if (p->pipe) nvmtl_vk_cmd_bind_pipeline(c, p);
     VkViewport vp = { 0, (float)ps->h, (float)ps->w, -(float)ps->h, 0, 1 }; VkRect2D sc = { { 0, 0 }, { ps->w, ps->h } };
@@ -5637,6 +5646,7 @@ void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t i
 {
     if (c->nobind) return;
     const uint32_t n = instances ? instances : 1;
+    nvmtl_self_tex_barrier(c);   // <wtl>
     const int split = nvmtl_fetch_split(c, count, n);
     if (split == 2) {
         for (uint32_t k = 0; k < n; k++) {
@@ -5719,6 +5729,7 @@ void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, ui
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
     const uint32_t n = instances ? instances : 1;
+    nvmtl_self_tex_barrier(c);   // <wtl>
     const int split = nvmtl_fetch_split(c, count, n);
     if (split == 2) {
         for (uint32_t k = 0; k < n; k++) {
