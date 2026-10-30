@@ -1340,9 +1340,44 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_vbl_wait_us, CTLFLAG_RD | CTLFLAG_LOCKE
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_vbl_pipe, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopVblPipe, 0, "Intel pipe whose scanline the copy follows (-1 none found)");
 SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_vbl_hit, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntIopVblHit, "Intel panel frames copied from the start of a vblank");
 SYSCTL_QUAD(_debug, OID_AUTO, nvaccel_iop_vbl_miss, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gCntIopVblMiss, "Intel panel frames copied without a vblank (no pipe, or none within 25 ms)");
+// I-119: clflush drops the source's cache lines before the copy, in case the GPU wrote around the CPU cache; cap reads
+// a 384x384 crop of the panel framebuffer back after the next copy, so the panel can be checked without looking at it.
+static int gIopClflush, gIopCapX, gIopCapY, gIopCapArm, gIopCapSeq;
+static unsigned *gIopCapBuf;
+static const unsigned kIopCap = 384;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_clflush, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopClflush, 0, "1 = flush the source surface from the CPU cache before each Intel panel copy");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_x, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapX, 0, "left edge of the panel crop, pixels");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_y, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapY, 0, "top edge of the panel crop, pixels");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_arm, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapArm, 0, "1 = take the crop after the next panel copy");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_seq, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapSeq, 0, "crops taken");
+static int nvaccel_iop_capbuf_sysctl SYSCTL_HANDLER_ARGS
+{
+    if (!gIopCapBuf) return ENOENT;
+    return SYSCTL_OUT(req, gIopCapBuf, (size_t)kIopCap * kIopCap * 4);
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_iop_capbuf, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_iop_capbuf_sysctl, "S",
+            "the last panel crop, BGRA, 384x384");
+static void nvXeIopClflush(const volatile void *p, size_t n)
+{
+    for (uintptr_t a = (uintptr_t)p & ~63ul, e = (uintptr_t)p + n; a < e; a += 64) __asm__ volatile("clflush (%0)" :: "r"(a) : "memory");
+    __asm__ volatile("mfence" ::: "memory");
+}
+static void nvXeIopCapture(const volatile unsigned *d, unsigned dpr, unsigned w, unsigned h)
+{
+    if (!gIopCapArm || !gIopCapBuf || w < kIopCap || h < kIopCap) return;
+    const unsigned x0 = (unsigned)gIopCapX > w - kIopCap ? w - kIopCap : (unsigned)gIopCapX;
+    const unsigned y0 = (unsigned)gIopCapY > h - kIopCap ? h - kIopCap : (unsigned)gIopCapY;
+    for (unsigned y = 0; y < kIopCap; y++)
+        for (unsigned x = 0; x < kIopCap; x++) gIopCapBuf[y * kIopCap + x] = d[(unsigned long)(y0 + y) * dpr + x0 + x];
+    gIopCapArm = 0; OSIncrementAtomic(&gIopCapSeq);
+}
 static void nvXeVblSysctls(void)
 {
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vblsync);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us);
+    if (!gIopCapBuf) gIopCapBuf = (unsigned *)IOMalloc((size_t)kIopCap * kIopCap * 4);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_clflush);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_capbuf);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_x);     sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_y);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_arm);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_seq);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us_max); sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_wait_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_pipe);  sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_hit);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_miss);
@@ -1458,10 +1493,12 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     if (head == 4 && gIopVblSync) {
         OSAddAtomic64(1, nvXeWaitVblank(a->fPCI, h) ? &gCntIopVblHit : &gCntIopVblMiss);
         const uint64_t t0 = mach_absolute_time();
+        if (gIopClflush) nvXeIopClflush(src, (size_t)h * pitch);
         if (pitch == q.pitch) memcpy((void *)d, (const void *)src, (size_t)h * pitch);
         else for (unsigned y = 0; y < h; y++)
             memcpy((void *)(d + (unsigned long)y * dpr), (const void *)(src + (unsigned long)y * spr), (size_t)words * 4);
         gIopCopyUs = (int)nvXeUs(t0);
+        nvXeIopCapture(d, dpr, w, h);
         if (gIopCopyUs > gIopCopyUsMax) gIopCopyUsMax = gIopCopyUs;
     } else
 #endif

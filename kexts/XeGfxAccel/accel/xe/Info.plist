@@ -8,8 +8,8 @@
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>XeGfxAccel</string>
 	<key>CFBundlePackageType</key><string>KEXT</string>
-	<key>CFBundleShortVersionString</key><string>0.2</string>
-	<key>CFBundleVersion</key><string>0.2</string>
+	<key>CFBundleShortVersionString</key><string>0.3</string>
+	<key>CFBundleVersion</key><string>0.3</string>
 	<key>OSBundleLibraries</key>
 	<dict>
 		<key>com.apple.iokit.IOAcceleratorFamily2</key><string>2.0.0</string>
