@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
 
+#include <sys/stat.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -4212,6 +4213,7 @@ static void nvmtl_enc78_census(void) {
 }
 void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c);
 @interface NVMTLCommandBuffer () { @public NVMTLBuffer *_e78Ring; size_t _e78RingOff; } @end
+@interface NVMTLCommandBuffer () { @public unsigned _xeKinds; } @end
 @interface NVMTLCommandBuffer () { @public BOOL _g79Owed, _g79C2C; NSMutableArray *_g79Sig, *_g79Promised; } @end
 enum { NVMTL_G79_DUPIDX = 32, NVMTL_G79_DUPMAX = 64 };
 @interface NVMTLCommandBuffer () { @public __unsafe_unretained NVMTLBuffer *_g79BRing[NVMTL_G79_DUPIDX]; size_t _g79BOff[NVMTL_G79_DUPIDX];
@@ -5053,6 +5055,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 }
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {
     nvmtl_g79_flush(self);
+    _xeKinds |= 4;
     NVMTLRenderCommandEncoder *e = [NVMTLRenderCommandEncoder new];
     _nEnc++;
     e->_cb = self; e->_target = (NVMTLTexture *)d.colorAttachments[0].texture;
@@ -5164,8 +5167,28 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     if (ws && !nvmtl_ws_kernel_waits()) [self waitUntilCompleted]; else [self waitUntilScheduled];
     return self.status != MTLCommandBufferStatusError;
 }
+// I-119 bisect: WindowServer waits for the command buffers whose encoder kinds match the mask in this file (1 blit,
+// 2 compute, 4 render, 8 every one), re-read while it runs, so a wait can be toggled without restarting WindowServer.
+static unsigned nvmtl_xe_live_mask(void) {
+    static _Atomic unsigned mask; static _Atomic uint64_t checked; static long mt = -1;
+    static int ws = -1; if (ws < 0) ws = getprogname() && !strcmp(getprogname(), "WindowServer");
+    if (!ws) return 0;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (now - atomic_load(&checked) > 250000000ull) {
+        atomic_store(&checked, now);
+        struct stat st; unsigned m = 0;
+        if (stat("/Library/GPUBundles/nvmtl/xe-live", &st) == 0) {
+            if ((long)st.st_mtime == mt) return atomic_load(&mask);
+            mt = (long)st.st_mtime; FILE *f = fopen("/Library/GPUBundles/nvmtl/xe-live", "r");
+            if (f) { if (fscanf(f, "%u", &m) != 1) m = 0; fclose(f); }
+        } else mt = -1;
+        if (m != atomic_exchange(&mask, m)) nvlog("xe-live wait mask %u", m);
+    }
+    return atomic_load(&mask);
+}
 - (void)commit {
     [self nvmtlSubmitWithEvents];
+    { const unsigned m = nvmtl_xe_live_mask(); if (m && ((m & 8) || (_xeKinds & m))) [self waitUntilCompleted]; }
     // NVMTL_DEBUG_WAIT_EACH=1: every command buffer is waited for and its completion traced, so a GPU hang is pinned to
     // the command buffer (and the debug groups traced before it) that never finished. A diagnostic: it serialises the app.
     static int each = -1; if (each < 0) { const char *e = getenv("NVMTL_DEBUG_WAIT_EACH"); each = e && e[0] == '1'; }
@@ -5173,6 +5196,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         [self waitUntilCompleted]; nvtrace("CB done #%lu status %ld", k, (long)self.status); }
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
+    _xeKinds |= 2;
     NVMTLComputeCommandEncoder *e = [NVMTLComputeCommandEncoder new]; e->_cb = self; _nEnc++; return e;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)t {
@@ -5185,6 +5209,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
 - (id<MTLResourceStateCommandEncoder>)resourceStateCommandEncoderWithDescriptor:(MTLResourceStatePassDescriptor *)d { return nil; }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
     nvmtl_g79_flush(self);
+    _xeKinds |= 1;
     NVMTLBlitCommandEncoder *e = [NVMTLBlitCommandEncoder new]; e->_cb = self; _nEnc++; return e;
 }
 - (id<MTLAccelerationStructureCommandEncoder>)accelerationStructureCommandEncoder {
