@@ -21,6 +21,7 @@ static void nvtrace_emit(const char *fmt, ...) __attribute__((format(printf, 1, 
 // even when the trace writer immediately returns without emitting anything.
 #define nvtrace(...) do { if (nvmtl_trace_on()) nvtrace_emit(__VA_ARGS__); } while (0)
 static unsigned nvmtl_xe_live_mask_r(int raw);
+static NVMTLTexture *nvmtl_self_snap(NVMTLTexture *root, BOOL make);
 static unsigned long long nvmtl_global_trace_id(id o) {
     static char key; static unsigned long long next = 1;
     @synchronized (o) {
@@ -3221,8 +3222,12 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     nvmtl_retain_resource(_cb, nt);
     nvmtl_surface_cpu_dump(nt->_parent ? nt->_parent : nt);
     nvmtl_surface_in_for_cb(_cb, nt);
-    // the pass samples its own target: its draws need a barrier first (nvmtl_self_tex_barrier); xe-live bit 256 turns it off
-    if (_target && (nt->_parent ?: nt) == (_target->_parent ?: _target) && !(nvmtl_xe_live_mask_r(1) & 256)) _cb->_c.self_tex = 1;
+    // the pass samples its own target: read the copy taken before the pass (nvmtl_self_snap), else put a barrier before
+    // its draws (nvmtl_self_tex_barrier); xe-live bit 256 turns both off
+    if (_target && (nt->_parent ?: nt) == (_target->_parent ?: _target) && !(nvmtl_xe_live_mask_r(1) & 256)) {
+        if (_snap && !nt->_parent) nt = _snap;
+        else { _cb->_c.self_tex = 1; nvmtl_self_snap(_target->_parent ?: _target, YES); }
+    }
     { NVMTLTexture *rt = nt->_parent ? nt->_parent : nt; nvtrace("FTEX[%lu] %ux%u surf %u view %d", (unsigned long)i, [nt nvi]->w, [nt nvi]->h,
         rt->_surf ? (unsigned)IOSurfaceGetID(rt->_surf) : 0u, nt->_parent != nil); }
     if (nt->_tbView) nvmtl_vk_bind_texel_view(&_cb->_c, NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_tbView, nt->_tbStorage);
@@ -5094,6 +5099,13 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                 (unsigned long)d.colorAttachments[0].storeAction, d.colorAttachments[0].clearColor.red, d.colorAttachments[0].clearColor.green,
                 d.colorAttachments[0].clearColor.blue, d.colorAttachments[0].clearColor.alpha, (unsigned long)e->_target.pixelFormat,
                 e->_target->_parent != nil); } }
+    // A target WindowServer samples inside its own pass: on Apple GPUs that read returns the pass's starting pixels
+    // (tile memory), so give those draws a copy of the target taken before the pass begins.
+    if (e->_target && d.colorAttachments[0].loadAction == MTLLoadActionLoad) {
+        NVMTLTexture *r = e->_target->_parent ?: e->_target, *snap = nvmtl_self_snap(r, NO);
+        if (snap && !(nvmtl_xe_live_mask_r(1) & 256) && !nvmtl_vk_cmd_copy_image(&_c, [r nvi], 0, 0, [snap nvi], 0, 0, [r nvi]->w, [r nvi]->h)) {
+            e->_snap = snap; if (!_resources) _resources = [NVMTLResSet new]; [_resources addObject:snap]; }
+    }
     if (!_resources) _resources = [NVMTLResSet new];
     if (e->_target) [_resources addObject:e->_target];
     if (d.depthAttachment.texture) [_resources addObject:d.depthAttachment.texture];
@@ -5225,6 +5237,22 @@ static unsigned nvmtl_xe_live_mask_r(int raw) {
     return m;
 }
 static unsigned nvmtl_xe_live_raw(void) { return nvmtl_xe_live_mask_r(1); }
+// The pre-pass copy of each target that was sampled inside its own pass, made the first time that happens.
+static NVMTLTexture *nvmtl_self_snap(NVMTLTexture *root, BOOL make) {
+    static NSMapTable *map; static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+    os_unfair_lock_lock(&lk);
+    if (!map) map = [NSMapTable weakToStrongObjectsMapTable];
+    NVMTLTexture *snap = [map objectForKey:root];
+    os_unfair_lock_unlock(&lk);
+    if (snap || !make) return snap;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:root.pixelFormat width:[root nvi]->w height:[root nvi]->h mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
+    snap = (NVMTLTexture *)[root.device newTextureWithDescriptor:td];
+    if (!snap) return nil;
+    nvlog("self-sampled target %ux%u fmt %lu: later passes read a copy taken before the pass", [root nvi]->w, [root nvi]->h, (unsigned long)root.pixelFormat);
+    os_unfair_lock_lock(&lk); if (![map objectForKey:root]) [map setObject:snap forKey:root]; os_unfair_lock_unlock(&lk);
+    return snap;
+}
 static unsigned nvmtl_xe_live_mask(void) { return nvmtl_xe_live_mask_r(0); }
 // I-119: on ANV an app's render pass or IOSurface write could still be running when WindowServer composited the
 // surface, which showed as horizontal bands; apps on Intel now wait for those at commit (bit 64 in xe-live turns it off).
