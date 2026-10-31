@@ -3253,6 +3253,17 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     NVMTLTexture *t = _target->_parent ?: _target;
     nvlog_raw("xe-pass draw tgt %ux%u surf %u n %lu fs %s blend %s", [t nvi]->w, [t nvi]->h, t->_surf ? (unsigned)IOSurfaceGetID(t->_surf) : 0u,
           (unsigned long)n, _ps ? _ps->_fname.UTF8String : "-", _ps ? _ps->_blend.UTF8String : "-");
+    // bit 4096 adds the first floats of vertex buffers 0-2 and fragment buffers 0-1 as the CPU sees them at encode time (I-119)
+    if (!(m & 4096) || n > 48) return;
+    for (int set = 0; set < 2; set++) for (int i = 0; i < (set ? 2 : 3); i++) {
+        NVMTLBuffer *b = set ? _fbufAt[i] : _vbufAt[i]; const NSUInteger off = set ? _fbufOff[i] : _vbufOff[i];
+        const unsigned char *c = b ? (const unsigned char *)[b contents] : NULL;
+        if (!c || off >= b->_b.size) continue;
+        const size_t nf = MIN((size_t)24, (b->_b.size - off) / 4); const float *f = (const float *)(c + off);
+        char line[600]; int k = snprintf(line, sizeof line, "xe-pass  %s%d +%lu:", set ? "fb" : "vb", i, (unsigned long)off);
+        for (size_t j = 0; j < nf && k < (int)sizeof line - 16; j++) k += snprintf(line + k, sizeof line - k, " %.4g", f[j]);
+        nvlog_raw("%s", line);
+    }
 }
 - (void)drawPrimitives:(MTLPrimitiveType)type vertexStart:(NSUInteger)start vertexCount:(NSUInteger)count
          instanceCount:(NSUInteger)instances baseInstance:(NSUInteger)baseInstance {
