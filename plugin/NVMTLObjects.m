@@ -4245,6 +4245,7 @@ static void nvmtl_enc78_census(void) {
 void nvmtl_vk_cmd_barrier_c2c(nvk_cmdbuf *c);
 @interface NVMTLCommandBuffer () { @public NVMTLBuffer *_e78Ring; size_t _e78RingOff; } @end
 @interface NVMTLCommandBuffer () { @public unsigned _xeKinds; } @end
+@interface NVMTLCommandBuffer () { @public __unsafe_unretained NVMTLTexture *_xePrevT; } @end
 @interface NVMTLCommandBuffer () { @public BOOL _g79Owed, _g79C2C; NSMutableArray *_g79Sig, *_g79Promised; } @end
 enum { NVMTL_G79_DUPIDX = 32, NVMTL_G79_DUPMAX = 64 };
 @interface NVMTLCommandBuffer () { @public __unsafe_unretained NVMTLBuffer *_g79BRing[NVMTL_G79_DUPIDX]; size_t _g79BOff[NVMTL_G79_DUPIDX];
@@ -5090,6 +5091,28 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     NVMTLRenderCommandEncoder *e = [NVMTLRenderCommandEncoder new];
     _nEnc++;
     e->_cb = self; e->_target = (NVMTLTexture *)d.colorAttachments[0].texture;
+    // I-119 probe, xe-live bit 2048 with /tmp/nvmtl-dump-request: when a WindowServer pass on a display surface follows
+    // a pass on a small private target (the backdrop blur cache), dump that target as the earlier passes left it.
+    { static unsigned seq; const unsigned m = nvmtl_xe_live_mask_r(1);
+      if (!(m & 2048)) seq = 0;
+      else if (e->_target && getprogname() && !strcmp(getprogname(), "WindowServer")) {
+        NVMTLTexture *p = _xePrevT, *r = e->_target->_parent ?: e->_target;
+        if (p && !p->_surf && r->_surf && [p nvi]->bpp == 4 && [p nvi]->w <= 1024 && [p nvi]->h <= 512 && seq < 60
+            && access("/tmp/nvmtl-dump-request", F_OK) == 0) {
+            nvk_image *pi = [p nvi]; const uint32_t w = pi->w, h = pi->h;
+            const unsigned n = seq++, sid = (unsigned)IOSurfaceGetID(r->_surf);
+            __block nvk_buffer hb = {0};
+            if (!nvmtl_vk_buffer_create((size_t)w * h * 4, 1, &hb) && hb.map
+                && !nvmtl_vk_cmd_copy_image_to_buffer_layer(&_c, pi, 0, 0, w, h, &hb, 0, w * 4, 0)) {
+                [self addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                    char f[96]; snprintf(f, sizeof f, "/tmp/nvmtl-blur-%d-%03u-s%u-%ux%u.bgra", (int)getpid(), n, sid, w, h);
+                    int fd = open(f, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd >= 0) { (void)!write(fd, hb.map, (size_t)w * h * 4); close(fd); }
+                    nvmtl_vk_buffer_destroy(&hb); }];
+            } else if (hb.buf) nvmtl_vk_buffer_destroy(&hb);
+        }
+      }
+      if (e->_target) _xePrevT = e->_target->_parent ?: e->_target; }
     // I-119 cursor square: bit 128 in xe-live logs WindowServer's render passes (400 lines each time it is set).
     { static unsigned left; static int armed; const unsigned m = nvmtl_xe_live_mask_r(1);
       if (!(m & 128)) armed = 0; else if (!armed) { armed = 1; left = 400; }
