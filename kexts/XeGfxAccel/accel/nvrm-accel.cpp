@@ -120,7 +120,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_igpu, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 #if defined(NMX_ACCEL) && defined(NMX_XEGFX)
 // the same accelerator over XeGfx (Intel Xe, branch xe): its own bundle id, matched only after XeGfx claims the GPU
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.8", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxAccel, "0.9", _start, _stop) }
 #elif defined(NMX_ACCEL)
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 #else
@@ -1348,7 +1348,7 @@ static const unsigned kIopCap = 384;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_clflush, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopClflush, 0, "1 = flush the source surface from the CPU cache before each Intel panel copy");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_x, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapX, 0, "left edge of the panel crop, pixels");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_y, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapY, 0, "top edge of the panel crop, pixels");
-SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_arm, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapArm, 0, "1 = crop after the next panel copy, 2 = just before it (what was on screen until then), 3 = after its vblank wait, before the copy");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_arm, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapArm, 0, "1 = crop after the next panel copy, 2 = just before it (what was on screen until then), 3 = after its vblank wait, before the copy, 4 = panel after the copy plus the source cap_delay_us later (capbuf2)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_seq, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapSeq, 0, "crops taken");
 static int nvaccel_iop_capbuf_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -1369,6 +1369,31 @@ static void nvXeIopCapture(const volatile unsigned *d, unsigned dpr, unsigned w,
     const unsigned y0 = (unsigned)gIopCapY > h - kIopCap ? h - kIopCap : (unsigned)gIopCapY;
     for (unsigned y = 0; y < kIopCap; y++)
         for (unsigned x = 0; x < kIopCap; x++) gIopCapBuf[y * kIopCap + x] = d[(unsigned long)(y0 + y) * dpr + x0 + x];
+    gIopCapArm = 0; OSIncrementAtomic(&gIopCapSeq);
+}
+// I-119: arm 4 crops the panel right after the copy, waits cap_delay_us, then crops the same spot of the source surface,
+// to show whether the surface still changes after WindowServer swapped it.
+static int gIopCapDelayUs = 8000;
+static unsigned *gIopCapBuf2;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_cap_delay_us, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopCapDelayUs, 0, "arm 4: wait before the source crop, us (max 50000)");
+static int nvaccel_iop_capbuf2_sysctl SYSCTL_HANDLER_ARGS
+{
+    if (!gIopCapBuf2) return ENOENT;
+    return SYSCTL_OUT(req, gIopCapBuf2, (size_t)kIopCap * kIopCap * 4);
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvaccel_iop_capbuf2, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_iop_capbuf2_sysctl, "S",
+            "arm 4: the source surface crop taken cap_delay_us after the panel crop, BGRA, 384x384");
+static void nvXeIopCapLater(const volatile unsigned *d, unsigned dpr, const volatile unsigned *s, unsigned spr, unsigned w, unsigned h)
+{
+    if (gIopCapArm != 4 || !gIopCapBuf || !gIopCapBuf2 || w < kIopCap || h < kIopCap) return;
+    const unsigned x0 = (unsigned)gIopCapX > w - kIopCap ? w - kIopCap : (unsigned)gIopCapX;
+    const unsigned y0 = (unsigned)gIopCapY > h - kIopCap ? h - kIopCap : (unsigned)gIopCapY;
+    for (unsigned y = 0; y < kIopCap; y++)
+        for (unsigned x = 0; x < kIopCap; x++) gIopCapBuf[y * kIopCap + x] = d[(unsigned long)(y0 + y) * dpr + x0 + x];
+    const int us = gIopCapDelayUs < 0 ? 0 : gIopCapDelayUs > 50000 ? 50000 : gIopCapDelayUs;
+    if (us >= 1000) IOSleep((unsigned)us / 1000); else if (us) IODelay((unsigned)us);
+    for (unsigned y = 0; y < kIopCap; y++)
+        for (unsigned x = 0; x < kIopCap; x++) gIopCapBuf2[y * kIopCap + x] = s[(unsigned long)(y0 + y) * spr + x0 + x];
     gIopCapArm = 0; OSIncrementAtomic(&gIopCapSeq);
 }
 static IOMemoryMap *gXeMmio;
@@ -1461,7 +1486,8 @@ static void nvXeVblSysctls(void)
 {
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_vblsync);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us);
     if (!gIopCapBuf) gIopCapBuf = (unsigned *)IOMalloc((size_t)kIopCap * kIopCap * 4);
-    sysctl_register_oid(&sysctl__debug_nvaccel_iop_clflush);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_capbuf);
+    if (!gIopCapBuf2) gIopCapBuf2 = (unsigned *)IOMalloc((size_t)kIopCap * kIopCap * 4);
+    sysctl_register_oid(&sysctl__debug_nvaccel_iop_clflush);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_capbuf); sysctl_register_oid(&sysctl__debug_nvaccel_iop_capbuf2); sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_delay_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_x);     sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_y);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_arm);   sysctl_register_oid(&sysctl__debug_nvaccel_iop_cap_seq);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_copy_us_max); sysctl_register_oid(&sysctl__debug_nvaccel_iop_vbl_wait_us);
@@ -1587,6 +1613,7 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
             memcpy((void *)(d + (unsigned long)y * dpr), (const void *)(src + (unsigned long)y * spr), (size_t)words * 4);
         gIopCopyUs = (int)nvXeUs(t0);
         nvXeIopCapture(d, dpr, w, h, 1);
+        nvXeIopCapLater(d, dpr, src, spr, w, h);
         if (gIopCopyUs > gIopCopyUsMax) gIopCopyUsMax = gIopCopyUs;
     } else
 #endif
