@@ -12,6 +12,8 @@
 #include <mach/mach_time.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOLocks.h>
 
 #define XIFBLOG(fmt, ...) IOLog("XeGfxIntelFB: " fmt "\n", ##__VA_ARGS__)
 
@@ -60,7 +62,7 @@ static void xifbGuardClear()
 // kmutil places a kext in a kernel collection only with a _kmod_info symbol (Xcode generates it; this build does not)
 #include <mach/kmod.h>
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
-extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxIntelFB, "0.8", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(org.watchthelight.XeGfxIntelFB, "0.9", _start, _stop) }
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
 
@@ -153,10 +155,128 @@ static uint32_t xifbSnapHz(const uint8_t *e, int len, uint32_t meas)
     return (meas && bd > meas / 50) ? meas : best;    // more than 2 % off: keep the measurement
 }
 
+
+// Hardware cursor on pipe A's cursor plane. Without one IOFramebuffer draws a software cursor, every move damages a
+// rect around it, and WindowServer recomposites blurred window backdrops there (the I-119 square).
+// The GOP maps a 16 MB GGTT block at 0xff000000 for its 16,384,000-byte framebuffer; the 96 pages after it lie in
+// i915's reserved top of GGTT, so pointing 64 of them at our own pages leaves everything else alone.
+#define XIFB_CUR_DIM   256u
+#define XIFB_CUR_GGTT  0xfffa0000u
+#define XIFB_GSM       0x800000u                     // GGTT PTEs in BAR0
+#define XIFB_CUR_CTL   0x70080
+#define XIFB_CUR_BASE  0x70084
+#define XIFB_CUR_POS   0x70088
+#define XIFB_CUR_WM0   0x70140
+#define XIFB_CUR_SAGV  0x70158
+#define XIFB_CUR_BUF   0x7017c
+#define XIFB_P1_BUF    0x7027c
+#define XIFB_P1_SURF   0x7019c
+
 class XeGfxIntelFramebuffer : public IONDRVFramebuffer {
     OSDeclareDefaultStructors(XeGfxIntelFramebuffer)
     uint8_t fEdid[256]; int fEdidLen = 0; uint32_t fHz16 = 0;
+    IOMemoryMap *fMmio = nullptr; volatile uint32_t *fR = nullptr;
+    IOBufferMemoryDescriptor *fCurMem = nullptr; IOMemoryMap *fCurMap = nullptr; uint32_t *fCurKva = nullptr;
+    uint64_t fCurPte[XIFB_CUR_DIM * XIFB_CUR_DIM * 4 / 4096] = {};
+    IOSimpleLock *fCurLock = nullptr; bool fCurReady = false, fCurDdb = false, fCurOn = false;
+    uint32_t rd(uint32_t o) { return fR[o / 4]; }
+    void wr(uint32_t o, uint32_t v) { fR[o / 4] = v; }
+    void waitFrame() { uint32_t a = rd(0x70040); for (int i = 0; i < 50 && rd(0x70040) == a; i++) IODelay(500); }
+    // our PTEs, rewritten when anything else changed them; PAT index 2 (uncached) like i915 gives scanout on MTL
+    void curPtes() {
+        volatile uint64_t *g = (volatile uint64_t *)((volatile uint8_t *)fR + XIFB_GSM) + (XIFB_CUR_GGTT >> 12);
+        bool chg = false;
+        for (unsigned i = 0; i < sizeof fCurPte / sizeof fCurPte[0]; i++) if (g[i] != fCurPte[i]) { g[i] = fCurPte[i]; chg = true; }
+        if (chg) { wr(0x101008, 1); (void)rd(0x101008); }
+    }
+    bool curSetup() {
+        int off = 0;
+        if (PE_parse_boot_argn("-xeintelfbnohwc", &off, sizeof off) || !fR) return false;
+        if (rd(XIFB_CUR_CTL) || rd(XIFB_P1_SURF) != 0xff000000u || rd(XIFB_P1_BUF) != 0x07ff0000u) {
+            XIFBLOG("hw cursor off: display not as the GOP left it (cur %08x surf %08x buf %08x)", rd(XIFB_CUR_CTL),
+                    rd(XIFB_P1_SURF), rd(XIFB_P1_BUF));
+            return false;
+        }
+        const size_t bytes = XIFB_CUR_DIM * XIFB_CUR_DIM * 4;
+        fCurMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut, bytes, 0x7ffffff000ull);
+        if (!fCurMem || fCurMem->prepare() != kIOReturnSuccess) { XIFBLOG("hw cursor off: no memory"); return false; }
+        fCurMap = fCurMem->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapWriteCombineCache);
+        if (!fCurMap) { XIFBLOG("hw cursor off: no mapping"); return false; }
+        fCurKva = (uint32_t *)fCurMap->getVirtualAddress();
+        for (unsigned i = 0; i < sizeof fCurPte / sizeof fCurPte[0]; i++) {
+            IOByteCount len = 0; addr64_t pa = fCurMem->getPhysicalSegment((IOByteCount)i * 4096, &len, kIOMemoryMapperNone);
+            if (!pa || (pa & 0xfff)) { XIFBLOG("hw cursor off: page %u at %llx", i, (unsigned long long)pa); return false; }
+            fCurPte[i] = pa | 1 | (1ull << 53);
+        }
+        bzero(fCurKva, bytes); __asm__ __volatile__("sfence" ::: "memory");
+        fCurLock = IOSimpleLockAlloc();
+        fCurReady = fCurLock != nullptr;
+        XIFBLOG("hw cursor ready: %ux%u ARGB at GGTT %08x", XIFB_CUR_DIM, XIFB_CUR_DIM, XIFB_CUR_GGTT);
+        return fCurReady;
+    }
+    // the GOP gave plane 1 all 2048 DBUF blocks; the cursor takes the last 32 (i915's single-pipe cursor share)
+    void curDdb() {
+        if (fCurDdb) return;
+        wr(XIFB_P1_BUF, 0x07df0000u); wr(XIFB_P1_SURF, rd(XIFB_P1_SURF)); waitFrame(); waitFrame();
+        wr(XIFB_CUR_BUF, 0x07ff07e0u);
+        wr(XIFB_CUR_WM0, (1u << 31) | (3u << 14) | 8u);
+        wr(XIFB_CUR_SAGV, (1u << 31) | (6u << 14) | 16u);
+        fCurDdb = true;
+    }
+    void curRegs(SInt32 x, SInt32 y, bool on) {
+        uint32_t pos = (x < 0 ? (1u << 15) | (uint32_t)(-x & 0xfff) : (uint32_t)(x & 0xfff)) |
+                       (y < 0 ? (1u << 31) | ((uint32_t)(-y & 0xfff) << 16) : ((uint32_t)(y & 0xfff) << 16));
+        wr(XIFB_CUR_POS, pos);
+        wr(XIFB_CUR_CTL, on ? (1u << 14) | 0x27u : 0);  // trickle feed off, 256x256 ARGB
+        wr(XIFB_CUR_BASE, XIFB_CUR_GGTT);                // arms CTL, POS, WM and BUF_CFG
+    }
+    SInt32 fCurX = 0, fCurY = 0; bool fCurVis = false, fCurImg = false;
 public:
+    IOReturn getAttribute(IOSelect attr, uintptr_t *value) override {
+        if (attr == kIOHardwareCursorAttribute) { if (value) *value = fCurReady; return kIOReturnSuccess; }
+        return IONDRVFramebuffer::getAttribute(attr, value);
+    }
+    IOReturn setCursorImage(void *img) override {
+        if (!fCurReady) return IONDRVFramebuffer::setCursorImage(img);
+        const size_t bytes = XIFB_CUR_DIM * XIFB_CUR_DIM * 4;
+        uint32_t *st = (uint32_t *)IOMalloc(bytes); if (!st) return kIOReturnNoMemory;
+        bzero(st, bytes);
+        IOHardwareCursorDescriptor d; bzero(&d, sizeof d);
+        d.majorVersion = kHardwareCursorDescriptorMajorVersion; d.minorVersion = kHardwareCursorDescriptorMinorVersion;
+        d.width = XIFB_CUR_DIM; d.height = XIFB_CUR_DIM; d.bitDepth = 32; d.supportedSpecialEncodings = kTransparentEncodedPixel;
+        IOHardwareCursorInfo ci; bzero(&ci, sizeof ci);
+        ci.majorVersion = kHardwareCursorInfoMajorVersion; ci.minorVersion = kHardwareCursorInfoMinorVersion;
+        ci.hardwareCursorData = (UInt8 *)st;
+        bool ok = convertCursorImage(img, &d, &ci) && ci.cursorWidth && ci.cursorHeight &&
+                  ci.cursorWidth <= XIFB_CUR_DIM && ci.cursorHeight <= XIFB_CUR_DIM;
+        if (ok) {
+            // premultiplied ARGB, rows of 256 pixels
+            for (unsigned y = 0; y < XIFB_CUR_DIM; y++)
+                for (unsigned x = 0; x < XIFB_CUR_DIM; x++) {
+                    uint32_t p = (y < ci.cursorHeight && x < ci.cursorWidth) ? st[y * ci.cursorWidth + x] : 0, a = p >> 24;
+                    uint32_t r = (((p >> 16) & 255) * a + 127) / 255, g = (((p >> 8) & 255) * a + 127) / 255, b = ((p & 255) * a + 127) / 255;
+                    fCurKva[y * XIFB_CUR_DIM + x] = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+            __asm__ __volatile__("sfence" ::: "memory");
+        }
+        IOFree(st, bytes);
+        static unsigned n; if (++n <= 4) XIFBLOG("hw cursor image %u: %s %ux%u", n, ok ? "ok" : "declined", (unsigned)ci.cursorWidth, (unsigned)ci.cursorHeight);
+        if (!ok) return kIOReturnUnsupported;
+        curDdb();   // once: waits two frames, so here (thread context) and not in setCursorState
+        IOInterruptState is = IOSimpleLockLockDisableInterrupt(fCurLock);
+        curPtes(); fCurImg = true; if (fCurDdb) curRegs(fCurX, fCurY, fCurVis);
+        IOSimpleLockUnlockEnableInterrupt(fCurLock, is);
+        return kIOReturnSuccess;
+    }
+    IOReturn setCursorState(SInt32 x, SInt32 y, bool visible) override {
+        if (!fCurReady) return IONDRVFramebuffer::setCursorState(x, y, visible);
+        IOInterruptState is = IOSimpleLockLockDisableInterrupt(fCurLock);
+        fCurX = x; fCurY = y; fCurVis = visible;
+        if (fCurDdb) curRegs(x, y, visible && fCurImg);
+        IOSimpleLockUnlockEnableInterrupt(fCurLock, is);
+        static unsigned n; if (++n <= 3) XIFBLOG("hw cursor state %u: %d,%d %s", n, (int)x, (int)y, visible ? "shown" : "hidden");
+        return kIOReturnSuccess;
+    }
     IOService *probe(IOService *provider, SInt32 *score) override {
         int off = 0;
         if (PE_parse_boot_argn("-xeintelfboff", &off, sizeof off)) { XIFBLOG("off by boot-arg"); return nullptr; }
@@ -200,9 +320,10 @@ public:
                     fHz16 = fEdidLen ? xifbSnapHz(fEdid, fEdidLen, meas) : meas;
                     XIFBLOG("refresh measured %u.%02u Hz, reported %u.%02u Hz", meas >> 16, ((meas & 0xffff) * 100) >> 16,
                             fHz16 >> 16, ((fHz16 & 0xffff) * 100) >> 16);
-                    gRegs = nullptr; m->release();
+                    gRegs = nullptr; fMmio = m; fR = (volatile uint32_t *)m->getVirtualAddress();
                 }
         }
+        if (!curSetup()) fCurReady = false;
         return IONDRVFramebuffer::start(provider);
     }
     bool hasDDCConnect(IOIndex ci) override { return fEdidLen ? true : IONDRVFramebuffer::hasDDCConnect(ci); }
