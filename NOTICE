@@ -40,7 +40,7 @@ BSD-2. Each folder keeps the licence of the code it came from:
 plugin/, kexts/XeGfxAccel/, kexts/XeGfxAGDC/ and kexts/NMIntelFB/ are forks of
 NullMoth Systems' nvidia-macos-driver
 (https://github.com/nullmoth/nvidia-macos-driver), carried over from the
-NvGfx fork (https://github.com/watchthelight-labs/NvGfx, branch xe-2.6.2,
+NvGfx fork (https://github.com/watchthelight-labs/WTLNvidiaGfx, branch xe-2.6.2,
 commit 2b9e3b2), where their history is. The PolyForm Noncommercial 1.0.0
 text is in licenses/PolyForm-Noncommercial-1.0.0.md: no commercial use, and
 keep the notices. translator/ is a fork of steelbrain's metal2vulkan.

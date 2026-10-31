@@ -23,7 +23,7 @@ Please do not run stage 4 on a machine you depend on yet. It starts i915 on your
 
 ## Where to send changes
 
-The shim, harness and checks are developed here and pulled into NvGfx's `xe` branch. Changes to the Metal plugin, the accelerator or the overlay go to [NvGfx](https://github.com/watchthelight-labs/NvGfx) on the `xe` branch. Open an issue first for anything larger than a fix, so we do not duplicate work.
+The shim, harness and checks are developed here and pulled into NvGfx's `xe` branch. Changes to the Metal plugin, the accelerator or the overlay go to [WTLNvidiaGfx](https://github.com/watchthelight-labs/WTLNvidiaGfx) on the `xe` branch. Open an issue first for anything larger than a fix, so we do not duplicate work.
 
 ## Questions
 

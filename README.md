@@ -1,4 +1,6 @@
-# XeGfx: Intel Xe graphics acceleration for macOS (Hackintosh)
+# WTLIntelGfx: Intel Xe graphics acceleration for macOS (Hackintosh)
+
+Renamed from `XeGfx` on 2026-10-31; the driver and its kexts are still called XeGfx. Old links redirect here.
 
 Real GPU acceleration for Intel Core Ultra graphics on a Hackintosh. XeGfx gives Meteor Lake and Arrow Lake iGPUs
 Metal and Vulkan on macOS, so the desktop, the Dock's Liquid Glass and your apps draw on the Intel GPU instead of the
@@ -26,8 +28,8 @@ It runs today on:
 
 It's still a test driver. One kernel panic under heavy disk reads is open (see [Status](#status-2026-10-28)), so try it
 on a Mac you can afford to reboot, not one you depend on. Downloads are on the
-[releases page](https://github.com/watchthelight-labs/XeGfx/releases), and the project page is
-[labs.watchthelight.org/XeGfx](https://labs.watchthelight.org/XeGfx/).
+[releases page](https://github.com/watchthelight-labs/WTLIntelGfx/releases), and the project page is
+[labs.watchthelight.org/WTLIntelGfx](https://labs.watchthelight.org/WTLIntelGfx/).
 
 The goal is one driver for every Xe generation, Tiger Lake through Lunar Lake plus Arc discrete cards, on every macOS
 from Big Sur 11 to Tahoe 26. Under the hood it runs Linux's i915 driver inside the macOS kernel ([How it works](#how-it-works)).
@@ -35,7 +37,7 @@ from Big Sur 11 to Tahoe 26. Under the hood it runs Linux's i915 driver inside t
 ## Does it work on my machine?
 
 Find your GPU's PCI ID with `ioreg -l | grep -i '"device-id"'` on macOS or `lspci -nn | grep VGA` on Linux. A report
-from your machine, working or not, is the most useful thing you can send ([issue #3](https://github.com/watchthelight-labs/XeGfx/issues/3)).
+from your machine, working or not, is the most useful thing you can send ([issue #3](https://github.com/watchthelight-labs/WTLIntelGfx/issues/3)).
 
 | Family | Example PCI IDs (8086:) | Graphics | State |
 |---|---|---|---|
@@ -45,13 +47,13 @@ from your machine, working or not, is the most useful thing you can send ([issue
 | Tiger Lake (11th gen Core) | 9A49, 9A40, 9A78, 9A60 | Xe-LP (Iris Xe, UHD) | untested; needs its own GuC firmware linked in |
 | Alder Lake, Raptor Lake (12th to 14th gen mobile) | 46A6, 46A3, 46A8, 4688, A7A0, A7A8, A788 | Xe-LP (Iris Xe, UHD) | stage 2 probe passes on 46A6 and stages 1 to 3 on 46A3 (tester reports); later stages need their own GuC firmware |
 | Intel Arc A-series (Alchemist) | 56A0, 56A1, 5690 | Xe-HPG | untested |
-| Lunar Lake, Battlemage, Panther Lake | 64A0, E20B, E20C | Xe2 and later | needs the xe driver, not i915 ([issue #8](https://github.com/watchthelight-labs/XeGfx/issues/8)) |
+| Lunar Lake, Battlemage, Panther Lake | 64A0, E20B, E20C | Xe2 and later | needs the xe driver, not i915 ([issue #8](https://github.com/watchthelight-labs/WTLIntelGfx/issues/8)) |
 
 If your Tiger Lake, Alder Lake or Raptor Lake laptop only needs its panel to work, look at [WhateverXe](https://github.com/b00t0x/WhateverXe) and [NootedGreen](https://github.com/sgiammori/NootedGreen) first. They run Apple's own Tiger Lake driver on your GPU and are further along on those chips. XeGfx exists because that route does not reach Meteor Lake, Arrow Lake or Arc, and because a driver built from i915 can follow Intel's Linux support to new chips.
 
 ## How it works
 
-XeGfx is not a GPU driver written from scratch. FreeBSD's [drm-kmod](https://github.com/freebsd/drm-kmod) already runs i915 on a non-Linux kernel through LinuxKPI, a layer that implements the Linux kernel API on top of FreeBSD's. XeGfx adds a small FreeBSD-kernel-API layer for XNU underneath LinuxKPI, so drm core and i915 build as one kext with their sources almost untouched. In userspace, Mesa's ANV Vulkan driver talks to it through a patched libdrm, and a Metal-to-Vulkan plugin runs on ANV. The plugin and the Metal accelerator kext are forks of NullMoth's NVIDIA driver, carried here from [NvGfx](https://github.com/watchthelight-labs/NvGfx), so this repository holds the whole Intel driver, kernel to Metal. [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) walks through each layer.
+XeGfx is not a GPU driver written from scratch. FreeBSD's [drm-kmod](https://github.com/freebsd/drm-kmod) already runs i915 on a non-Linux kernel through LinuxKPI, a layer that implements the Linux kernel API on top of FreeBSD's. XeGfx adds a small FreeBSD-kernel-API layer for XNU underneath LinuxKPI, so drm core and i915 build as one kext with their sources almost untouched. In userspace, Mesa's ANV Vulkan driver talks to it through a patched libdrm, and a Metal-to-Vulkan plugin runs on ANV. The plugin and the Metal accelerator kext are forks of NullMoth's NVIDIA driver, carried here from [WTLNvidiaGfx](https://github.com/watchthelight-labs/WTLNvidiaGfx), so this repository holds the whole Intel driver, kernel to Metal. [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) walks through each layer.
 
 ## Status (2026-10-28)
 
@@ -81,9 +83,9 @@ What each step showed on the 7D67:
 - **Accelerated desktop (N-285 to N-289, 2026-10-24).** WindowServer now runs on the Intel GPU and stays up: on N-285 it passed the guard's settle window and served the desktop for about four minutes, with 3660 display transactions and no failed frames. The fix that got it there was in the Metal plugin: WindowServer hands it some buffers that are not all writable memory, and importing those as host pointers lost the device about 20 s in, so the plugin now copies them instead. The Dock renders its Liquid Glass effect, which needs working GPU compositing. XeGfxIntelFB 0.5 sets the GPU's model name, so About This Mac and System Information show "Intel Xe Graphics".
 - **What still breaks.** One panic is understood and fixed: a lock that sleeps was taken inside an RCU read section on the mmap path WindowServer uses (0.0.42 takes the locks in the other order). The other is not: 15 to 45 seconds into some runs one CPU keeps interrupts off for over half a second and macOS panics because that CPU does not answer a rendezvous. GPU interrupts keep arriving and are handled right up to the end. 0.0.43 adds a watchdog that names that CPU and what it was running before macOS gives up. Turning the NVRAM trace off made it much rarer (on this firmware its NVRAM writes run in SMM, where a CPU cannot answer the rendezvous), but it came back on N-304 after 4 h 19 min under heavy disk reads with the trace off, so that was not the whole cause.
 
-The open problems are tracked in [NvGfx #12](https://github.com/watchthelight-labs/NvGfx/issues/12) and [#18](https://github.com/watchthelight-labs/NvGfx/issues/18).
+The open problems are tracked in [WTLNvidiaGfx #12](https://github.com/watchthelight-labs/WTLNvidiaGfx/issues/12) and [#18](https://github.com/watchthelight-labs/WTLNvidiaGfx/issues/18).
 
-The source is at 0.0.46 ([CHANGELOG](CHANGELOG.md)), which is also the newest booted version. With the NVRAM trace off (`xegfx.nvram_trace=0`) the Intel desktop ran one hour on N-296, then two hours (N-297), four hours (N-298) and 5.6 hours (N-299) while a load script wrote about 225 GB to disk and ran Metal draws every 22 seconds. N-304 then hit I-116 after 4 h 19 min while another process read the kernel collections over and over, so the stall is rarer, not gone. 0.0.46 fixes the panic that N-299's restart hit (I-121). On the Intel GPU, System Information now shows 24 GB of shared VRAM, and the panel is named from its EDID and runs at 165 Hz with the HiDPI mode. The newest test build is the [v0.0.46 prerelease](https://github.com/watchthelight-labs/XeGfx/releases/tag/v0.0.46). Desktop runs need the accelerator and plugin from this repository as well.
+The source is at 0.0.46 ([CHANGELOG](CHANGELOG.md)), which is also the newest booted version. With the NVRAM trace off (`xegfx.nvram_trace=0`) the Intel desktop ran one hour on N-296, then two hours (N-297), four hours (N-298) and 5.6 hours (N-299) while a load script wrote about 225 GB to disk and ran Metal draws every 22 seconds. N-304 then hit I-116 after 4 h 19 min while another process read the kernel collections over and over, so the stall is rarer, not gone. 0.0.46 fixes the panic that N-299's restart hit (I-121). On the Intel GPU, System Information now shows 24 GB of shared VRAM, and the panel is named from its EDID and runs at 165 Hz with the HiDPI mode. The newest test build is the [v0.0.46 prerelease](https://github.com/watchthelight-labs/WTLIntelGfx/releases/tag/v0.0.46). Desktop runs need the accelerator and plugin from this repository as well.
 
 [VedCloud's Meteor Lake port](https://github.com/VedCloud/Meteor-Lake-Xe-LPG-Metal-Graphics) got to a GPU-composited desktop first: it runs an i915-derived driver with Metal and Vulkan on a Dell Latitude 5350 under macOS 15. XeGfx takes a different road (unchanged drm-kmod sources over its own shim) and targets Tahoe as well.
 
@@ -109,7 +111,7 @@ XeGfx is built on other people's work. Thanks to all of them.
 | [nullmoth/nvidia-macos-driver](https://github.com/nullmoth/nvidia-macos-driver) | `plugin/`, `kexts/XeGfxAccel`, `kexts/XeGfxAGDC` and `kexts/NMIntelFB` are forks of it; its old AMD/Intel port (commit `bf2dee3`) supplies the GPL-free dma-buf, sync_file and fence-unwrap replacements and the Mesa/libdrm Darwin patches used in NvGfx's `xe` branch |
 | [Mesa](https://gitlab.freedesktop.org/mesa/mesa) ANV and [libdrm](https://gitlab.freedesktop.org/mesa/drm) | the Vulkan userspace |
 | [steelbrain/metal2vulkan](https://github.com/steelbrain/metal2vulkan) | the Metal-to-SPIR-V translator in `translator/`; its coverage table and refusals list, and its Arrow Lake ANV validation profile |
-| [watchthelight-labs/kcabi](https://github.com/watchthelight-labs/kcabi) | kernel collection link and ABI checks |
+| [watchthelight-labs/kcabi](https://github.com/watchthelight-labs/WTLKcAbi) | kernel collection link and ABI checks |
 
 **Projects we studied** (ideas, findings and warnings only; no code copied):
 
@@ -137,8 +139,8 @@ XeGfx is built on other people's work. Thanks to all of them.
 
 | Who | Machine | What they reported |
 |---|---|---|
-| [zsct648gn6-dev](https://github.com/zsct648gn6-dev) | Lenovo Legion Y9000P 2022, i7-12700H, `46A6` | stage 2 probe passes on 0.0.46 ([#3](https://github.com/watchthelight-labs/XeGfx/issues/3#issuecomment-6538047492)) |
-| [TrDiTu](https://github.com/TrDiTu) | HP Victus 15, i7-12650H, `46A3` | stages 1 to 3 pass; stage 4 panicked in the PCH lookup, fixed in 0.0.47 ([#3](https://github.com/watchthelight-labs/XeGfx/issues/3#issuecomment-6529881723)) |
+| [zsct648gn6-dev](https://github.com/zsct648gn6-dev) | Lenovo Legion Y9000P 2022, i7-12700H, `46A6` | stage 2 probe passes on 0.0.46 ([#3](https://github.com/watchthelight-labs/WTLIntelGfx/issues/3#issuecomment-6538047492)) |
+| [TrDiTu](https://github.com/TrDiTu) | HP Victus 15, i7-12650H, `46A3` | stages 1 to 3 pass; stage 4 panicked in the PCH lookup, fixed in 0.0.47 ([#3](https://github.com/watchthelight-labs/WTLIntelGfx/issues/3#issuecomment-6529881723)) |
 | [ductruongvu23](https://github.com/ductruongvu23) | Gigabyte Gaming A16, i7-13620H, `A7A8` | an iGPU in a discrete-mode MUX shows up as class 0380, which the probe missed until 0.0.47 |
 | [UNDERDOG07](https://github.com/UNDERDOG07) | Lenovo Legion Y7000P IRX10, i7-14650HX, `A788` | device data for the 32 EU Raptor Lake-HX part, class 0380 in discrete mode |
 | [HAOoool](https://github.com/HAOoool) | Dell G15 5511, i7-11800H, `9A60` | Tiger Lake-H device data; discrete mode removes the iGPU from ACPI and PCI |
@@ -186,7 +188,7 @@ userland/scripts/build_*.sh   # libdrm, Mesa ANV and the Vulkan loader
 sudo tools/install.sh         # into the auxiliary kernel collection (XEGFX_MODE=uninstall to remove)
 ```
 
-Kexts and the plugin land in `~/src/XeGfx-build` (`OUTROOT`, `XEGFX_OUT`). `build/xeaccel-pkg` and `build/xeintelfb-pkg` hold install scripts that swap one kext in the auxiliary collection and keep a backup. `tools/kpi_split.py` and the link check use [kcabi](https://github.com/watchthelight-labs/kcabi), expected in `~/src/kcabi`.
+Kexts and the plugin land in `~/src/XeGfx-build` (`OUTROOT`, `XEGFX_OUT`). `build/xeaccel-pkg` and `build/xeintelfb-pkg` hold install scripts that swap one kext in the auxiliary collection and keep a backup. `tools/kpi_split.py` and the link check use [WTLKcAbi](https://github.com/watchthelight-labs/WTLKcAbi), expected in `~/src/kcabi`.
 
 ## Layout
 
