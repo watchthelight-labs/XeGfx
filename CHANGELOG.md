@@ -2,6 +2,11 @@
 
 Versions are the kext's `CFBundleVersion`. "Booted" means the version ran on the test laptop (Legion 5 15IAX10, Arrow Lake iGPU `8086:7D67`); "built" means it compiled and has not been run. Prereleases with a binary: v0.0.27, v0.0.35, v0.0.36, v0.0.38, v0.0.45 and v0.0.46.
 
+## 0.0.47 (built, not booted yet)
+
+- The stage 2 probe and the later stages find an Intel GPU whose PCI class is 0380 (display, other) as well as 0300. A MUX in discrete mode leaves the iGPU as 0380, so the probe found nothing on those machines (I-125, reported by two testers).
+- Stage 4 no longer panics on GPUs older than Meteor Lake. i915 looks up the PCH's ISA bridge there, LinuxKPI names a kobject after that driverless device, whose name is NULL, and `xg_vsnprintf` read the NULL format string. It now prints "(fmt null)" as FreeBSD's kvprintf does (I-124, Alder Lake-P tester report in #3). Meteor Lake and Arrow Lake skip that lookup, which is why our machines never hit it.
+
 ## Unreleased (plugin, booted: N-319, N-320)
 
 - Horizontal bands across the desktop while typing or scrolling are gone (I-119). An app's render pass or IOSurface write
