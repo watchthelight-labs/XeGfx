@@ -227,7 +227,7 @@ class XeGfxIntelFramebuffer : public IONDRVFramebuffer {
         uint32_t pos = (x < 0 ? (1u << 15) | (uint32_t)(-x & 0xfff) : (uint32_t)(x & 0xfff)) |
                        (y < 0 ? (1u << 31) | ((uint32_t)(-y & 0xfff) << 16) : ((uint32_t)(y & 0xfff) << 16));
         wr(XIFB_CUR_POS, pos);
-        wr(XIFB_CUR_CTL, on ? (1u << 14) | 0x27u : 0);  // trickle feed off, 256x256 ARGB
+        wr(XIFB_CUR_CTL, on ? (1u << 14) | 0x23u : 0);  // trickle feed off, 256x256 ARGB (0x27 is 64x64)
         wr(XIFB_CUR_BASE, XIFB_CUR_GGTT);                // arms CTL, POS, WM and BUF_CFG
     }
     SInt32 fCurX = 0, fCurY = 0; bool fCurVis = false, fCurImg = false;
