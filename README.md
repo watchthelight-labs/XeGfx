@@ -42,8 +42,8 @@ from your machine, working or not, is the most useful thing you can send ([issue
 | Arrow Lake-S / HX (Core Ultra 200S, 200HX) | 7D67 | Xe-LPG | **runs**: Metal, Vulkan, accelerated desktop (two laptops) |
 | Meteor Lake (Core Ultra 100H, 100U) | 7D55, 7DD5, 7D45, 7D40 | Xe-LPG | **runs**: Metal on a 155H (tester report, Sequoia) |
 | Arrow Lake-H / U (Core Ultra 200H, 200U) | 7D51, 7DD1, 7D41 | Xe-LPG(+) | untested; same GuC firmware as 7D67, so the closest match |
-| Tiger Lake (11th gen Core) | 9A49, 9A40, 9A78 | Xe-LP (Iris Xe, UHD) | untested; needs its own GuC firmware linked in |
-| Alder Lake, Raptor Lake (12th to 14th gen mobile) | 46A6, 46A8, A7A0, A7A8 | Xe-LP (Iris Xe, UHD) | untested; needs its own GuC firmware |
+| Tiger Lake (11th gen Core) | 9A49, 9A40, 9A78, 9A60 | Xe-LP (Iris Xe, UHD) | untested; needs its own GuC firmware linked in |
+| Alder Lake, Raptor Lake (12th to 14th gen mobile) | 46A6, 46A3, 46A8, 4688, A7A0, A7A8, A788 | Xe-LP (Iris Xe, UHD) | stage 2 probe passes on 46A6 and stages 1 to 3 on 46A3 (tester reports); later stages need their own GuC firmware |
 | Intel Arc A-series (Alchemist) | 56A0, 56A1, 5690 | Xe-HPG | untested |
 | Lunar Lake, Battlemage, Panther Lake | 64A0, E20B, E20C | Xe2 and later | needs the xe driver, not i915 ([issue #8](https://github.com/watchthelight-labs/XeGfx/issues/8)) |
 
@@ -126,11 +126,25 @@ XeGfx is built on other people's work. Thanks to all of them.
 | [zep245/IrisXe-macos-driver](https://github.com/zep245/IrisXe-macos-driver) | i915 and Mesa ANV running on Tiger Lake under Sequoia through NullMoth's Intel path; sandboxed apps see no GPU because the sandbox refuses `opendir(/dev/dri)`, and the in-kernel LinuxKPI panics it ran into (thread_call limits, `cond_resched` inside `ggtt_pin`, TLB flush timeouts); in 1.0.0 (October 2026) scaled desktops through i915's panel fitter by giving a modeset the panel's timing with a smaller source, the hardware cursor plane, page flips instead of copies, NVRAM breadcrumbs that made each flip take about 700 ms, and the plugin's one-time copy of small no-copy textures that hid typed letters; in 1.0.1 (October 2026) Tahoe icons back on the GPU after finding that buffer textures were refused on ANV's memory types (the same cause as our I-120, found independently), and per-function constant spaces for linked visible functions |
 | [CENSEDAXIS20025/ASUS-FX608LP-Hackintosh-Multiboot](https://github.com/CENSEDAXIS20025/ASUS-FX608LP-Hackintosh-Multiboot) | the same Core Ultra 9 275HX, 7D67 iGPU and RTX 5070 Laptop running macOS on the RTX with the iGPU blocked and the MUX set to discrete only |
 | [Mountainatic/ArrowWhatever](https://github.com/Mountainatic/ArrowWhatever) | the same Core Ultra 9 275HX and 7D67 iGPU with an RTX 5080 Laptop on XeGfx 0.0.44, with ten patches of their own: a pin versus last-unwire race in userptr buffers, GGTT zero-copy scanout with a flip deferred until the GPU is idle (about 60 fps at 2560x1600, up from about 15), and the panel timing read from BAR0. Their userptr panic and fix (patch 0001) is the same bug we hit as I-121 and fixed in 0.0.46, found independently. Patch 0009 lets WindowServer submit without waiting and flips only once the engines are idle, which took the desktop to about 60 fps. We have not taken a patch yet |
+| [victorwitkamp/NootedGreen](https://github.com/victorwitkamp/NootedGreen) (branch `raptor-lake-hx`) | a NootedGreen fork for Raptor Lake-HX that ports i915 forcewake, pipe VDSC and the render engine workarounds; its owner reports Metal on a ROG Strix G814JI |
 | [samranahmad09/WhateverXe-RaptorLakeP](https://github.com/samranahmad09/WhateverXe-RaptorLakeP) | checking a bring-up by capturing i915's registers on Linux next to a macOS readout, and a blitter ring self-test |
 | [lutzbichler/drm-kmod](https://github.com/lutzbichler/drm-kmod) (xe patches) and [drm-kmod #316](https://github.com/freebsd/drm-kmod/issues/316) | the state of the xe driver outside Linux |
 | [drm-kmod #315](https://github.com/freebsd/drm-kmod/issues/315), [#418](https://github.com/freebsd/drm-kmod/pull/418), [#468](https://github.com/freebsd/drm-kmod/pull/468) | LinuxKPI bugs FreeBSD already fixed for Meteor Lake and Arc, to carry over |
 | [openbsd/src](https://github.com/openbsd/src) inteldrm | attaching i915 in stages and deferring the heavy probe |
 | [acidanthera/WhateverGreen](https://github.com/acidanthera/WhateverGreen) and [OpenCorePkg](https://github.com/acidanthera/OpenCorePkg) | the Intel framebuffer background every Hackintosh graphics project builds on |
+
+**Testers** (reports from machines other than ours; every result counts, working or not):
+
+| Who | Machine | What they reported |
+|---|---|---|
+| [zsct648gn6-dev](https://github.com/zsct648gn6-dev) | Lenovo Legion Y9000P 2022, i7-12700H, `46A6` | stage 2 probe passes on 0.0.46 ([#3](https://github.com/watchthelight-labs/XeGfx/issues/3#issuecomment-6538047492)) |
+| [TrDiTu](https://github.com/TrDiTu) | HP Victus 15, i7-12650H, `46A3` | stages 1 to 3 pass; stage 4 panicked in the PCH lookup, fixed in 0.0.47 ([#3](https://github.com/watchthelight-labs/XeGfx/issues/3#issuecomment-6529881723)) |
+| [ductruongvu23](https://github.com/ductruongvu23) | Gigabyte Gaming A16, i7-13620H, `A7A8` | an iGPU in a discrete-mode MUX shows up as class 0380, which the probe missed until 0.0.47 |
+| [UNDERDOG07](https://github.com/UNDERDOG07) | Lenovo Legion Y7000P IRX10, i7-14650HX, `A788` | device data for the 32 EU Raptor Lake-HX part, class 0380 in discrete mode |
+| [HAOoool](https://github.com/HAOoool) | Dell G15 5511, i7-11800H, `9A60` | Tiger Lake-H device data; discrete mode removes the iGPU from ACPI and PCI |
+| [559911](https://github.com/559911) | Mechrevo GM6AR57C, i7-12800HX, `4688` | Alder Lake-HX device data, with WhateverXe 0.6.1 for comparison |
+| [Mochen-wu](https://github.com/Mochen-wu) | ROG Strix G16 G614JVR, i9-14900HX, `A788` | Raptor Lake-HX device data on Tahoe 26.7.2 |
+| [phmthnh](https://github.com/phmthnh) | Acer Nitro AN515-58, i5-12500H, `46A6` | Linux topology, stolen memory and firmware versions |
 
 ## How it stays safe to test
 
