@@ -217,11 +217,20 @@ xg_find_pci(uint16_t vendor, uint8_t cls, uint8_t sub)
 	return found;
 }
 
+/* a MUX in discrete mode leaves the iGPU as display-other (0x0380) instead of VGA (0x0300) */
+static IOPCIDevice *
+xg_find_igpu(void)
+{
+	IOPCIDevice *gpu = xg_find_pci(0x8086, 0x03, 0x00);
+
+	return gpu ? gpu : xg_find_pci(0x8086, 0x03, 0x80);
+}
+
 static int
 xg_probe(void)
 {
 	OSDictionary *d = OSDictionary::withCapacity(32);
-	IOPCIDevice *gpu = xg_find_pci(0x8086, 0x03, 0x00), *smb = xg_find_pci(0x8086, 0x0c, 0x05);
+	IOPCIDevice *gpu = xg_find_igpu(), *smb = xg_find_pci(0x8086, 0x0c, 0x05);
 	int rc = 1;
 
 	if (!d)
@@ -313,7 +322,7 @@ static int
 xg_display_check(void)
 {
 	OSDictionary *d = OSDictionary::withCapacity(8);
-	IOPCIDevice *gpu = xg_find_pci(0x8086, 0x03, 0x00);
+	IOPCIDevice *gpu = xg_find_igpu();
 	IOMemoryMap *mm = gpu ? gpu->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0, kIOMapInhibitCache) : nullptr;
 	int rc = -6;
 
@@ -386,7 +395,7 @@ xg_gt_check(void)
 static int
 xg_accel_claim(void)
 {
-	IOPCIDevice *gpu = xg_find_pci(0x8086, 0x03, 0x00);
+	IOPCIDevice *gpu = xg_find_igpu();
 
 	if (gpu == nullptr)
 		return -19;
@@ -484,7 +493,7 @@ xg_run_stage(int s)
 		if (s == 3) {
 			/* every IOPCIDevice into newbus (config reads only), then vgapci on the Intel display function so
 			 * stage 4's drm drivers have a device to probe; the old PCI personality used to trigger this */
-			IOPCIDevice *gpu = xg_find_pci(0x8086, 0x03, 0x00);
+			IOPCIDevice *gpu = xg_find_igpu();
 			int err = gpu ? xg_pci_xnu_start(gpu) : ENODEV;
 			OSSafeReleaseNULL(gpu);
 			rc = err ? -err : 1;
@@ -815,6 +824,9 @@ xg_vsnprintf(char *out, size_t len, const char *fmt, va_list ap)
 	va_list aq;
 	int n;
 
+	/* as FreeBSD's kvprintf: lkpi_pci_get_class names a kobject after a driverless device, whose nameunit is NULL */
+	if (fmt == nullptr)
+		fmt = "(fmt null)";
 	va_copy(aq, ap);
 	if (!xg_has_pext(fmt)) {
 		n = vsnprintf(out, len, fmt, aq);
